@@ -1,35 +1,34 @@
 # AI Selects — Lightroom Classic Plugin
 
-AI-powered photo culling for Lightroom Classic. Score hundreds of photos using vision AI models, then select the best subset using quality-driven culling or AI-driven narrative storytelling.
+> **Status:** Experimental, personal project, actively developed. Output quality is not yet where I want it — pipeline, prompts, and selection logic all change frequently. Use at your own risk; expect rough edges. I'm publishing the repo so people can see the kind of work I've been doing, not because it's finished.
 
-**The problem:** Photographers routinely shoot 500+ photos per session but need 40-80 for a final deliverable. Existing culling tools handle the "thousands to hundreds" first pass (removing obvious rejects), but the "hundreds to dozens" final selection remains entirely manual. AI Selects automates this second pass using vision LLMs for scoring, combined with smart deduplication, category-aware distribution, and optional AI narrative curation.
+A Lightroom Classic plugin that uses vision AI to score photos and propose a curated subset. Built for the cull that comes after the obvious-rejects pass — narrowing hundreds of decent photos toward the dozens you'd consider sharing, from events both long and short (weddings, vacations, sports games, parties, family trips, portrait sessions, and so on).
+
+Existing culling tools handle "thousands → hundreds." This is aimed at "hundreds → dozens," using vision LLM scoring, multi-layer deduplication, category-aware distribution, and an optional AI-driven narrative pass.
 
 ## Features
 
 - **Two selection modes:**
   - **Best Of** — quality-driven culling with temporal distribution across your timeline
-  - **Story** — AI-driven narrative selection with a multi-pass pipeline: story assembly, vision-based beat casting, story review, and swap resolution
-- **AI scoring** via Claude, OpenAI, Gemini, or local Ollama models — rates technical quality, composition, emotion, moment quality, content, narrative role, and eye quality
-- **Three-layer deduplication:**
-  - Burst detection (EXIF timestamps)
-  - Perceptual hashing (dHash visual fingerprinting)
-  - Content description similarity (AI-generated semantic comparison)
-- **Category-aware selection** — groups photos by content type and distributes selections proportionally
-- **Face coverage** — automatically ensures at least one photo of every named person is included, using Lightroom's built-in face detection data
-- **Story presets** — Wedding, Family Vacation, Documentary Travel, Portrait Session, Editorial, Landscape Portfolio, Fun/Playful, and Custom
-- **Cost tracking** — real-time API cost tracking with per-pass breakdowns
-- **Non-destructive** — creates a Collection with your selects; never modifies or deletes originals
-- **Zero external dependencies** — uses macOS built-in tools (`sips`, `sqlite3`, `curl`) for all processing
+  - **Story** — multi-pass narrative pipeline: scene inventory, story assembly, vision-based beat casting, similarity gate, story review, swap resolution
+- **AI scoring** via Claude, OpenAI, Gemini, or local Ollama — rates technical quality, composition, emotion, moment, plus content description, narrative role, and eye quality
+- **Three-layer deduplication:** burst detection (EXIF timestamps), perceptual hashing (dHash), content description similarity (word overlap)
+- **Category-aware distribution** — groups photos by content type and distributes selections proportionally
+- **Face coverage** — tries to include at least one photo of every named person, using Lightroom's built-in face detection data
+- **Story presets** — Wedding, Family Vacation, Documentary Travel, Portrait Session, Editorial, Landscape Portfolio, Fun/Playful, Custom
+- **Cost tracking** — per-pass API cost tracking with cumulative totals
+- **Non-destructive** — creates a Collection; never modifies or deletes originals
+- **No extra tools to install** — uses macOS built-ins (`sips`, `sqlite3`, `curl`); you still bring your own AI provider (see Requirements)
 
 ## Requirements
 
-- macOS (uses `sips`, `sqlite3`, and `curl` which are built-in)
+- macOS (uses `sips`, `sqlite3`, and `curl` — all built-in)
 - Lightroom Classic (SDK 6.0+)
 - One of:
-  - **Ollama** installed locally with a vision model (free, private, no API key needed)
-  - **Anthropic API key** for Claude (recommended — highest quality)
-  - **Google API key** for Gemini (recommended — fastest and cheapest, ~$0.03 for 68 photos)
-  - **OpenAI API key** for GPT-4o/GPT-4V
+  - **Ollama** installed locally with a vision model — free, private, no API key needed (lower quality)
+  - **Anthropic API key** for Claude
+  - **Google API key** for Gemini
+  - **OpenAI API key** for GPT-4o
 
 ## Installation
 
@@ -47,7 +46,7 @@ The plugin appears under **Library > Plug-in Extras** with four menu items.
 1. Select photos in the Library grid (or select All Photos in a folder)
 2. Go to **Library > Plug-in Extras > Score & Select**
 3. Choose your mode (Best Of or Story), adjust settings, and click **Run**
-4. The plugin scores every photo via AI, then selects the best subset
+4. The plugin scores every photo via AI, then proposes a subset based on the current scoring and selection logic
 5. In Story mode, a mid-run dialog lets you describe your story and adjust the target count after seeing scores
 6. Your selects appear in a new Collection and Lightroom navigates to it automatically
 
@@ -66,7 +65,7 @@ The primary entry point. Shows a configuration dialog before each run:
 
 - **Mode** — Best Of (quality cull) or Story (narrative edit)
 - **Story preset** — genre-specific curation guidelines (visible in Story mode)
-- **Pre-scoring hints** — context the AI uses during scoring (e.g., "this is from 2007", "the older man is my dad")
+- **Pre-scoring hints** — context the AI uses during scoring (e.g., "this is from 2007", "the man in green is the groom's father")
 - **Target count** — how many photos to select
 - **Technical emphasis** — percentage balance between technical quality and aesthetic appeal (default 40%)
 - **Provider info** — shows current AI provider (change in Settings)
@@ -75,13 +74,13 @@ The primary entry point. Shows a configuration dialog before each run:
 
 #### Best Of
 
-Quality-driven culling with temporal distribution. Ensures selections are spread across your timeline, preventing clustering around a single time period.
+Quality-driven culling with temporal distribution. Aims to spread selections across the timeline rather than clustering them around a single time period.
 
 Pipeline: Reject → Burst Dedup → Visual Dedup (dHash) → Content Dedup → Temporal Segmentation → Category Distribution → Face Coverage → Collection
 
-#### Story (v3 Multi-Pass Pipeline)
+#### Story
 
-AI-driven narrative selection using a multi-pass architecture:
+Multi-pass narrative selection:
 
 ```
 Pass 1:   Score (AI vision — per photo)
@@ -91,16 +90,16 @@ Pass 3:   Candidate Shortlisting
   3A: Code pre-filter (hard constraints per beat)
   3B: AI text ranking (order candidates by fit)
 Pass 4:   Beat Casting (AI vision — compare candidates per beat, scarcity-first order)
-Pass 4.5: Similarity Gate (phash — catches near-duplicate selections)
+Pass 4.5: Similarity Gate (phash + content overlap — catches near-duplicate selections)
 Pass 5:   Story Review (AI vision — review full selection for coherence)
 Pass 6:   Swap Resolution (AI vision — targeted replacements)
 ```
 
-The **Scene Inventory** clusters all photos into distinct moments using WHO (people groups), WHEN (capture time as primary signal), and WHAT (activity). This gives the story assembly a bird's-eye view of all available content, preventing duplicate beats and ensuring coverage of unique moments. The clustering is duration-adaptive — handling everything from 1-hour portrait sessions to multi-year compilations.
+The **Scene Inventory** clusters photos into distinct moments by WHO (people groups), WHEN (capture time), and WHAT (activity), giving story assembly a bird's-eye view of available content. Clustering is duration-adaptive — the input range it tries to support spans 1-hour sessions through multi-year compilations.
 
-**Scarcity-first beat ordering** in Pass 4 processes beats with the fewest candidates first, preventing the common problem where later beats find all their candidates already consumed by earlier beats.
+**Scarcity-first beat ordering** in Pass 4 processes beats with the fewest candidates first, so later beats don't end up with their candidates already consumed.
 
-Before scoring, a mid-run dialog lets you describe the story in natural language and optionally emphasize specific moments. The AI pre-populates a summary based on what it saw during scoring.
+After scoring, a mid-run dialog lets you describe the story in natural language and optionally emphasize specific moments. The AI pre-populates a draft summary from what it saw during scoring; you edit it before selection runs.
 
 **Story presets:**
 
@@ -128,7 +127,7 @@ Each photo is rendered as a JPEG at the configured render size, base64-encoded, 
 | **Emotion** (1-10) | Mood, feeling, emotional resonance |
 | **Moment** (1-10) | Timing, decisive moment, peak action |
 | **Content** | 3-5 word description of the subject/scene |
-| **Category** | Primary visual element (landscape, portrait, wildlife, architecture, food, street) |
+| **Category** | Primary visual element (landscape, portrait, wildlife, architecture, food, street, macro, event, nature, detail, other) |
 | **Narrative Role** | Editorial role (scene_setter, character_moment, action, detail, transition, closing, establishing, emotional_peak) |
 | **Eye Quality** | Eye quality for visible people (good, fair, closed, na) |
 | **Reject** | true if obviously bad (blurry, badly exposed, accidental shot) |
@@ -169,17 +168,17 @@ Catches duplicates that timestamp detection misses: returning to the same scene 
 
 ### Face Detection & Coverage
 
-Uses Lightroom's built-in face detection to ensure every named person appears at least once in the final selects:
+Uses Lightroom's built-in face detection to try to include each named person at least once:
 
 1. Queries the catalog database (read-only) for face detection data
 2. After selection runs, checks which named people are missing
 3. Adds the highest-scoring photo of each missing person
 
-**Setup:** Use Lightroom's **People** view (press **O** in Library) and name face clusters. Only named people get coverage guarantees.
+**Setup:** Use Lightroom's **People** view (press **O** in Library) and name face clusters. Only named people are considered for coverage.
 
 ### Cost Tracking
 
-API costs are tracked in real-time across all passes. The summary dialog shows total cost for both scoring and selection phases, broken down by provider/model.
+API costs are tallied per pass and shown in the summary dialog at the end of a run, broken down by provider and model.
 
 ## Settings
 
@@ -208,7 +207,7 @@ Run-specific settings (mode, target count, weights, story preset) are configured
 
 **Scoring is slow** — Try reducing Render Size in Settings. For local models, smaller models score faster. Claude Haiku is the fastest cloud option.
 
-**Story mode falls back to Best Of** — The AI response couldn't be parsed. Check logs for details. This can happen with smaller local models that struggle with structured JSON responses. Claude and Gemini handle it reliably. If a response was truncated, the log will say "TRUNCATED — model hit output token limit."
+**Story mode falls back to Best Of** — The AI response couldn't be parsed. Check logs for details. This tends to happen with smaller local models that struggle with structured JSON. Claude and Gemini have worked better in testing. If a response was truncated, the log will say "TRUNCATED — model hit output token limit."
 
 **Face coverage not working** — Make sure you've used Lightroom's People view and named faces. Only named people get coverage guarantees.
 
@@ -219,12 +218,12 @@ Run-specific settings (mode, target count, weights, story preset) are configured
 ```
 AISelects.lrplugin/
   Info.lua                 — Plugin manifest
-  MetadataDefinition.lua   — Custom metadata field definitions (11 fields)
+  MetadataDefinition.lua   — Custom metadata field definitions
   MetadataTagset.lua       — Metadata panel display configuration
   Prefs.lua                — Settings defaults
   Config.lua               — Settings dialog UI
-  ScorePhotos.lua          — Pass 1: AI scoring (batch vision)
-  SelectPhotos.lua         — Selection pipeline (Best Of + Story v3)
+  ScorePhotos.lua          — Batch AI scoring
+  SelectPhotos.lua         — Selection pipeline (Best Of + Story)
   ScoreAndSelect.lua       — Run dialog + combined scoring + selection
   StoryPresets.lua         — Story mode preset definitions
   AIEngine.lua             — AI engine: prompts, API calls, hashing, face queries, cost tracking

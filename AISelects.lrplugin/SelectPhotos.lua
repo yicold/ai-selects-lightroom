@@ -1,22 +1,19 @@
 --[[
   SelectPhotos.lua
   ─────────────────────────────────────────────────────────────────────────────
-  Pass 2: Reads AI scores from custom metadata, applies selection pipeline,
-  and creates a Collection with the final selects.
+  Reads AI scores from custom metadata, applies the selection pipeline, and
+  creates a Collection with the final selects.
 
   Two selection modes:
     Best Of — quality-driven culling with temporal distribution
-    Story   — snapshot-based synthesis with optional Pass 2 refinement
+    Story   — multi-pass narrative pipeline (scene inventory → assembly →
+              candidate ranking → beat casting → similarity gate → review)
 
   Both modes share: reject → burst dedup → phash dedup → face coverage.
   They diverge at the final selection step.
 
-  v2: 4-dimension scores (technical, composition, emotion, moment),
-      composite via BatchStrategy weights, snapshot merge for story,
-      synthesis prompt with event blocks, Pass 2 focused comparisons.
-
-  Can be invoked directly (as a menu item) or via ScoreAndSelect.lua
-  which calls the exported runSelection(context, overrides) function.
+  Can be invoked directly (as a menu item) or via ScoreAndSelect.lua, which
+  calls the exported runSelection(context, overrides) function.
 
   macOS only. Settings via Library > Plugin Extras > Settings...
 --]]
@@ -34,6 +31,52 @@ local json          = dofile(_PLUGIN.path .. '/dkjson.lua')
 local Prefs         = dofile(_PLUGIN.path .. '/Prefs.lua')
 local Engine        = dofile(_PLUGIN.path .. '/AIEngine.lua')
 local BatchStrategy = dofile(_PLUGIN.path .. '/BatchStrategy.lua')
+local LrFileUtils   = import 'LrFileUtils'
+
+-- ── Load most recent snapshots file from disk ─────────────────────────────
+-- Used when running Select standalone (no in-memory snapshots from scoring).
+-- Returns snapshots array or nil.
+local function loadSnapshotsFromDisk(settings)
+    local folder = settings.logFolder
+    if not folder or folder == "" then
+        folder = LrPathUtils.getStandardFilePath('documents')
+    end
+    -- Check the Selects Logs subfolder first
+    local selFolder = LrPathUtils.child(folder, "Selects Logs")
+    if LrFileUtils.exists(selFolder) then
+        folder = selFolder
+    end
+
+    -- Find the most recent snapshot file (sorted by name = timestamp)
+    local newest = nil
+    for file in LrFileUtils.files(folder) do
+        local name = LrPathUtils.leafName(file)
+        if name:match("^AI_Selects_Snapshots_.*%.json$") then
+            if not newest or name > LrPathUtils.leafName(newest) then
+                newest = file
+            end
+        end
+    end
+
+    if not newest then return nil end
+
+    local ok, result = pcall(function()
+        local fh = io.open(newest, "r")
+        if not fh then return nil end
+        local raw = fh:read("*all")
+        fh:close()
+        local data = json.decode(raw)
+        if data and data.snapshots and #data.snapshots > 0 then
+            return data.snapshots
+        end
+        return nil
+    end)
+
+    if ok and result then
+        return result, newest
+    end
+    return nil
+end
 
 -- ── Logger setup (matches ScorePhotos.lua pattern) ────────────────────────
 local Logger
@@ -63,7 +106,6 @@ do
 end
 
 -- ── Read scores from custom metadata ──────────────────────────────────────
--- v2: Reads 4 dimensions. Falls back to v1 fields for migration.
 local function readScores(photo)
     local technical  = tonumber(photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsTechnical'))
     local scoreDate  = photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsScoreDate')
@@ -77,7 +119,7 @@ local function readScores(photo)
     local moment      = tonumber(photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsMoment'))
     local composite   = tonumber(photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsComposite'))
 
-    if not composition then return nil end  -- not scored with v2
+    if not composition then return nil end  -- incomplete score
 
     local content       = photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsContent')
     local category      = photo:getPropertyForPlugin(_PLUGIN, 'aiSelectsCategory')
@@ -92,7 +134,7 @@ local function readScores(photo)
         composition   = composition,
         emotion       = emotion,
         moment        = moment,
-        composite     = composite,  -- may be nil for v1 data, computed later
+        composite     = composite,  -- may be nil; recomputed from dimensions if missing
         content       = content or "unknown",
         category      = category or "other",
         narrativeRole = narrativeRole or "detail",
@@ -112,6 +154,7 @@ local function deduplicateByTimestamp(entries, burstThresholdSecs)
     -- Read timestamps
     for _, e in ipairs(entries) do
         e.timestamp = e.photo:getRawMetadata('dateTimeOriginal')
+            or e.photo:getRawMetadata('dateTime')
     end
 
     -- Sort by timestamp (nil timestamps go to end)
@@ -683,7 +726,8 @@ local function mergeSnapshots(snapshots)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- MODE 2: STORY — snapshot-based synthesis with Pass 2 refinement
+-- MODE 2 (fallback): STORY synthesis — single-call narrative selection used
+-- when no story prompt is set (e.g., standalone Select without mid-run dialog)
 -- ═══════════════════════════════════════════════════════════════════════════
 
 local function buildMetadataSummary(entries, faceMap)
@@ -777,10 +821,6 @@ local function selectStory(pool, settings, catalog, snapshots, progress)
 
     -- Build the prompt from SYNTHESIS_PROMPT_TEMPLATE
     local guidelines = preset.guidelines or ""
-    if settings.storyCustomInstructions and settings.storyCustomInstructions ~= "" then
-        guidelines = guidelines .. "\n\nAdditional instructions from the photographer:\n" ..
-            settings.storyCustomInstructions
-    end
 
     local chronoConstraint = preset.chronological
         and "Maintain chronological order based on timestamps when available."
@@ -799,7 +839,6 @@ local function selectStory(pool, settings, catalog, snapshots, progress)
     local replacements = {
         ["%%PRESET_NAME%%"]              = preset.name or "Custom",
         ["%%GUIDELINES%%"]               = guidelines,
-        ["%%CUSTOM_INSTRUCTIONS%%"]      = "",
         ["%%EVENT_BLOCKS%%"]             = eventBlocksJson,
         ["%%TARGET_COUNT%%"]             = tostring(targetCount),
         ["%%CHRONOLOGICAL_CONSTRAINT%%"] = chronoConstraint,
@@ -939,11 +978,15 @@ local function selectStory(pool, settings, catalog, snapshots, progress)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- v3 STORY MODE: Multi-pass pipeline (Passes 2-3)
--- Pass 2: Story Assembly (text-only → beat list)
--- Pass 3A: Code pre-filter (hard constraints per beat)
--- Pass 3B: AI text ranking (semantic matching per beat)
--- Passes 4-6 (vision) will be added in later phases.
+-- STORY MODE: Multi-pass pipeline
+-- Pre-pass: Scene/Moment Inventory (clusters photos by WHO+WHEN+WHAT)
+-- Pass 2:   Story Assembly (text → beat list)
+-- Pass 3A:  Code pre-filter (hard constraints per beat)
+-- Pass 3B:  AI text ranking (semantic matching per beat)
+-- Pass 4:   Beat Casting (vision compare → primary + backup per beat)
+-- Pass 4.5: Similarity Gate (phash + content overlap → swap near-dupes)
+-- Pass 5:   Story Review (vision review of full selection)
+-- Pass 6:   Swap Resolution (targeted vision swaps for flagged beats)
 -- ═══════════════════════════════════════════════════════════════════════════
 
 local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, progress)
@@ -1031,16 +1074,25 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
     -- pass can ensure variety and avoid thematic duplication.
     progress:setCaption("Analyzing scenes...")
     local sceneInventoryText = nil
+    local photoSceneMap = {}  -- photo localIdentifier → scene_id
 
     if settings.provider ~= "ollama" then
         Logger.info("Scene inventory: clustering photos into distinct moments...")
         local scenePrompt = Engine.buildSceneInventoryPrompt(allPhotosText, rollup)
-        -- Scale token budget with photo count: base 4096 + 64 tokens per photo
+        -- Scale token budget with photo count: base 4096 + 128 tokens per photo
+        -- (each scene needs ~100-150 tokens for name, photos, redundancy notes)
         local sceneMaxTokens = math.max(
             BatchStrategy.getMaxTokens(settings.provider, "synthesis"),
-            4096 + #photoList * 64
+            4096 + #photoList * 128
         )
-        local sceneResponse, sceneErr = Engine.queryText(scenePrompt, settings, sceneMaxTokens)
+        -- Scene inventory needs extra time for large photo sets
+        -- (212 photos ~= 64K chars prompt, Gemini needs 2-3 min to process)
+        local sceneSettings = {}
+        for k, v in pairs(settings) do sceneSettings[k] = v end
+        sceneSettings.timeoutSecs = math.max(settings.timeoutSecs or 90, 60 + #photoList)
+        Logger.info(string.format("Scene inventory: timeout %ds for %d photos",
+            sceneSettings.timeoutSecs, #photoList))
+        local sceneResponse, sceneErr = Engine.queryText(scenePrompt, sceneSettings, sceneMaxTokens)
 
         if sceneResponse then
             local inventory, parseErr = Engine.parseSceneInventoryResponse(sceneResponse)
@@ -1058,6 +1110,29 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                         Logger.warn("  Redundancy: " .. w)
                     end
                 end
+
+                -- Build photo→scene lookup: maps localIdentifier → scene_id
+                -- Used in candidate filtering to enforce 1-photo-per-scene constraint.
+                -- Synthesize an id when the AI omits scene_id so unidentified scenes
+                -- don't collapse to a single bucket (which would mark every other
+                -- such photo as "scene already used" once one was picked).
+                local synthSceneId = -1
+                for _, scene in ipairs(inventory.scenes) do
+                    local sid = scene.scene_id
+                    if sid == nil then
+                        sid = synthSceneId
+                        synthSceneId = synthSceneId - 1
+                    end
+                    if scene.photo_numbers then
+                        for _, photoNum in ipairs(scene.photo_numbers) do
+                            if photoList[photoNum] then
+                                photoSceneMap[photoList[photoNum].id] = sid
+                            end
+                        end
+                    end
+                end
+                Logger.info(string.format("Scene map: %d photos mapped to scenes",
+                    (function() local n = 0; for _ in pairs(photoSceneMap) do n = n + 1 end; return n end)()))
             else
                 Logger.warn("Scene inventory: parse failed — " .. tostring(parseErr))
             end
@@ -1128,7 +1203,8 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
         poolById[tostring(e.photo.localIdentifier)] = e
     end
 
-    local usedIds = {}  -- track photos already selected for prior beats
+    local usedIds = {}     -- track photos already selected for prior beats
+    local usedScenes = {}  -- track scene_ids already represented in the story
     local candidatesByBeat = {}
 
     for beatIdx, beat in ipairs(beats) do
@@ -1186,59 +1262,187 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
             until true
 
             if not dominated then
-                candidates[#candidates + 1] = {
+                -- Compute relevance score: how well does this photo match the beat?
+                -- Uses a tiered system: relevant photos (category/keyword match) are
+                -- strongly preferred over generic high-scorers to prevent mismatches
+                -- like aisle photos appearing in "Desserts" beats.
+                local relevance = 0  -- 0 = no match, >0 = has relevance signal
+                local catMatch = false
+
+                -- Category match: strong signal
+                if sc.categoryHint and e.category then
+                    for _, hint in ipairs(sc.categoryHint) do
+                        if e.category:lower() == hint:lower() then
+                            catMatch = true
+                            relevance = relevance + 1.0
+                            break
+                        end
+                    end
+                end
+
+                -- Keyword matching against photo content description
+                local contentLower = (e.content or ""):lower()
+                local kwMatches = 0
+                if sc.prefer and #sc.prefer > 0 then
+                    for _, kw in ipairs(sc.prefer) do
+                        if contentLower:find(kw:lower(), 1, true) then
+                            relevance = relevance + 0.5
+                            kwMatches = kwMatches + 1
+                        end
+                    end
+                end
+
+                -- Avoid penalty
+                if sc.avoid and #sc.avoid > 0 then
+                    for _, kw in ipairs(sc.avoid) do
+                        if contentLower:find(kw:lower(), 1, true) then
+                            relevance = relevance - 1.0
+                        end
+                    end
+                end
+
+                -- mustHave keyword matching (stronger signal than prefer)
+                if sc.mustHave and #sc.mustHave > 0 then
+                    for _, kw in ipairs(sc.mustHave) do
+                        if contentLower:find(kw:lower(), 1, true) then
+                            relevance = relevance + 0.7
+                        end
+                    end
+                end
+
+                -- Scene-cluster penalty: if this photo's scene already has a
+                -- selected photo, strongly deprioritize it to prevent near-dupes
+                -- (e.g., multiple aisle walk shots from the same moment)
+                local photoScene = photoSceneMap[id]
+                local sceneAlreadyUsed = photoScene and usedScenes[photoScene]
+
+                local hasRelevance = (relevance > 0)
+
+                -- Build candidate entry with relevance tier
+                local candidate = {
                     id        = id,
                     entry     = e,
                     content   = e.content,
                     composite = e.compositeScore,
+                    relevance = relevance,
+                    hasRelevance = hasRelevance,
+                    sceneUsed = sceneAlreadyUsed or false,
+                    sceneId   = photoScene,
                     category  = e.category,
                     time      = e.timestamp and LrDate.timeToUserFormat(e.timestamp, "%H:%M:%S") or "unknown",
                     people    = photoStore[id] and photoStore[id].people or {},
                 }
+
+                candidates[#candidates + 1] = candidate
             end
         end
 
-        -- Sort by composite descending
-        table.sort(candidates, function(a, b) return a.composite > b.composite end)
+        -- ── Prefer-then-fill: relevant candidates first, generic fill only if needed ──
+        -- Split into relevant (has category/keyword match) and generic (no match)
+        -- Scene-used candidates are DEMOTED to generic even if they match keywords,
+        -- so fresh scenes fill first and same-scene dupes only appear as last resort.
+        local relevant = {}
+        local generic  = {}
+        for _, c in ipairs(candidates) do
+            if c.sceneUsed then
+                -- Scene already represented in the story — demote to fill pool
+                generic[#generic + 1] = c
+            elseif c.hasRelevance then
+                relevant[#relevant + 1] = c
+            else
+                generic[#generic + 1] = c
+            end
+        end
 
-        -- If too few candidates, relax filters progressively
-        if #candidates < 8 then
+        -- Sort each pool: relevant by relevance*composite, generic by composite alone
+        -- Scene-used candidates sort to the bottom (halved score)
+        table.sort(relevant, function(a, b)
+            local scoreA = (1.0 + a.relevance) * a.composite * (a.sceneUsed and 0.5 or 1.0)
+            local scoreB = (1.0 + b.relevance) * b.composite * (b.sceneUsed and 0.5 or 1.0)
+            return scoreA > scoreB
+        end)
+        table.sort(generic, function(a, b)
+            local scoreA = a.composite * (a.sceneUsed and 0.5 or 1.0)
+            local scoreB = b.composite * (b.sceneUsed and 0.5 or 1.0)
+            return scoreA > scoreB
+        end)
+
+        -- Assemble final list: all relevant first (up to 40), then fill with generic
+        local maxCandidates = 20  -- tighter cap focuses vision AI on plausible matches
+        local final = {}
+        for _, c in ipairs(relevant) do
+            if #final >= maxCandidates then break end
+            final[#final + 1] = c
+        end
+        local relevantCount = #final
+        -- Only fill with generic if we need more candidates
+        if #final < 8 then
+            for _, c in ipairs(generic) do
+                if #final >= maxCandidates then break end
+                final[#final + 1] = c
+            end
+        end
+
+        -- If still too few, relax composite threshold
+        if #final < 8 then
             Logger.info(string.format("  Beat %d: only %d candidates after filtering, relaxing...",
-                beatIdx, #candidates))
-            -- Re-run with lower composite threshold
+                beatIdx, #final))
             local relaxed = {}
             for _, e in ipairs(pool) do
                 local id = tostring(e.photo.localIdentifier)
                 if not usedIds[id] and not e.reject then
+                    local rel = 0
+                    if sc.categoryHint and e.category then
+                        for _, hint in ipairs(sc.categoryHint) do
+                            if e.category:lower() == hint:lower() then
+                                rel = rel + 1.0; break
+                            end
+                        end
+                    end
+                    local cl = (e.content or ""):lower()
+                    if sc.prefer then
+                        for _, kw in ipairs(sc.prefer) do
+                            if cl:find(kw:lower(), 1, true) then rel = rel + 0.5 end
+                        end
+                    end
+                    if sc.avoid then
+                        for _, kw in ipairs(sc.avoid) do
+                            if cl:find(kw:lower(), 1, true) then rel = rel - 1.0 end
+                        end
+                    end
                     relaxed[#relaxed + 1] = {
                         id        = id,
                         entry     = e,
                         content   = e.content,
                         composite = e.compositeScore,
+                        relevance = rel,
+                        hasRelevance = (rel > 0),
                         category  = e.category,
                         time      = e.timestamp and LrDate.timeToUserFormat(e.timestamp, "%H:%M:%S") or "unknown",
                         people    = photoStore[id] and photoStore[id].people or {},
                     }
                 end
             end
-            table.sort(relaxed, function(a, b) return a.composite > b.composite end)
-            -- Take top 30 (or all if fewer)
-            candidates = {}
-            for i = 1, math.min(30, #relaxed) do
-                candidates[#candidates + 1] = relaxed[i]
+            table.sort(relaxed, function(a, b)
+                local scoreA = (1.0 + (a.relevance or 0)) * a.composite
+                local scoreB = (1.0 + (b.relevance or 0)) * b.composite
+                return scoreA > scoreB
+            end)
+            final = {}
+            for i = 1, math.min(maxCandidates, #relaxed) do
+                final[#final + 1] = relaxed[i]
+            end
+            relevantCount = 0
+            for _, c in ipairs(final) do
+                if c.hasRelevance then relevantCount = relevantCount + 1 end
             end
         end
 
-        -- Cap candidates at 40 for the AI ranking call
-        if #candidates > 40 then
-            local capped = {}
-            for i = 1, 40 do capped[#capped + 1] = candidates[i] end
-            candidates = capped
-        end
+        candidates = final
 
         candidatesByBeat[beatIdx] = candidates
-        Logger.info(string.format("  Beat %d: %d candidates for \"%s\"",
-            beatIdx, #candidates, beat.beat))
+        Logger.info(string.format("  Beat %d: %d candidates (%d relevant, %d fill) for \"%s\"",
+            beatIdx, #candidates, relevantCount, #candidates - relevantCount, beat.beat))
     end
 
     -- ── Pass 3A.5: Protect scarce candidates ────────────────────────────
@@ -1467,6 +1671,7 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                 for _, c in ipairs(candidates) do
                     if not usedIds[c.id] then
                         usedIds[c.id] = true
+                        if photoSceneMap[c.id] then usedScenes[photoSceneMap[c.id]] = true end
                         local e = c.entry
                         e.storyBeat     = beat.beat
                         e.storyRole     = beat.narrativeRole
@@ -1558,6 +1763,7 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                         -- Only one candidate — auto-select
                         local c = validCandidates[1]
                         usedIds[c.id] = true
+                        if photoSceneMap[c.id] then usedScenes[photoSceneMap[c.id]] = true end
                         local e = c.entry
                         e.storyBeat     = beat.beat
                         e.storyRole     = beat.narrativeRole
@@ -1596,6 +1802,7 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                                 local c = validCandidates[priPos]
                                 if not usedIds[c.id] then
                                     usedIds[c.id] = true
+                                    if photoSceneMap[c.id] then usedScenes[photoSceneMap[c.id]] = true end
                                     local e = c.entry
                                     e.storyBeat     = beat.beat
                                     e.storyRole     = beat.narrativeRole
@@ -1637,6 +1844,7 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                             for _, c in ipairs(validCandidates) do
                                 if not usedIds[c.id] then
                                     usedIds[c.id] = true
+                                    if photoSceneMap[c.id] then usedScenes[photoSceneMap[c.id]] = true end
                                     local e = c.entry
                                     e.storyBeat     = beat.beat
                                     e.storyRole     = beat.narrativeRole
@@ -1665,8 +1873,8 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
     -- Check pairwise phash distance between selected photos. If two are
     -- visually similar AND captured close together, swap the weaker one
     -- for its backup candidate.
-    local SIMILARITY_THRESHOLD = 16  -- out of 64 bits (~75% similar)
-    local SIMILARITY_TIME_SECS = 300 -- 5 minutes
+    local SIMILARITY_THRESHOLD = 20  -- out of 64 bits (~69% similar, catches more near-dupes)
+    local SIMILARITY_TIME_SECS = 600 -- 10 minutes (wider window for clock-sync issues)
     local similaritySwaps = 0
 
     -- Sort by position for pairwise comparison
@@ -1685,75 +1893,229 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                     local a = finalSelection[i]
                     local b = finalSelection[j]
 
-                    -- Both need phash values
+                    -- Check visual similarity via phash AND/OR content description
+                    local isSimilar = false
+                    local similarReason = ""
+
+                    -- Phash check
                     if a.phash and b.phash then
                         local dist = Engine.hashDistance(a.phash, b.phash)
                         if dist < SIMILARITY_THRESHOLD then
-                            -- Phash is similar — check time proximity
                             local timeA = a.timestamp or 0
                             local timeB = b.timestamp or 0
                             local timeDiff = math.abs(timeA - timeB)
 
-                            if timeDiff <= SIMILARITY_TIME_SECS then
-                                -- Similar AND close in time — swap the lower-scoring one
-                                Logger.warn(string.format(
-                                    "  Similarity: beats %d & %d — phash distance %d, %ds apart",
-                                    a.storyPosition or 0, b.storyPosition or 0, dist, timeDiff))
+                            local effectiveTimeCheck = true
+                            if timeA == 0 and timeB == 0 then
+                                -- No timestamps: use relaxed phash threshold
+                                effectiveTimeCheck = (dist < SIMILARITY_THRESHOLD)
+                            else
+                                effectiveTimeCheck = (timeDiff <= SIMILARITY_TIME_SECS)
+                            end
 
-                                -- Determine which to swap (lower composite score)
-                                local swapIdx = (a.compositeScore <= b.compositeScore) and i or j
-                                local swapEntry = finalSelection[swapIdx]
-                                local swapId = tostring(swapEntry.photo.localIdentifier)
+                            if effectiveTimeCheck then
+                                isSimilar = true
+                                similarReason = string.format("phash distance %d, %ds apart",
+                                    dist, math.abs((a.timestamp or 0) - (b.timestamp or 0)))
+                            end
+                        end
+                    end
 
-                                -- Find the beat index for this entry
-                                local swapBeatIdx = nil
-                                for bIdx, br in pairs(beatResults) do
-                                    if br.primaryId == swapId then
-                                        swapBeatIdx = bIdx
-                                        break
+                    -- Content description check: if both describe same scene
+                    -- (e.g., "couple walks down aisle"), flag even if phash differs
+                    if not isSimilar and a.content and b.content
+                       and #a.content > 20 and #b.content > 20 then
+                        local contentA = a.content:lower()
+                        local contentB = b.content:lower()
+                        -- Extract key content words (3+ chars) and compute overlap
+                        local function extractWords(s)
+                            local words = {}
+                            for w in s:gmatch("%a%a%a+") do
+                                -- Skip very common words
+                                if w ~= "the" and w ~= "and" and w ~= "with"
+                                   and w ~= "for" and w ~= "from" and w ~= "that" then
+                                    words[w] = true
+                                end
+                            end
+                            return words
+                        end
+                        local wordsA = extractWords(contentA)
+                        local wordsB = extractWords(contentB)
+                        local overlap, totalA, totalB = 0, 0, 0
+                        for w in pairs(wordsA) do totalA = totalA + 1 end
+                        for w in pairs(wordsB) do totalB = totalB + 1 end
+                        for w in pairs(wordsA) do
+                            if wordsB[w] then overlap = overlap + 1 end
+                        end
+                        local minTotal = math.min(totalA, totalB)
+                        if minTotal > 0 and overlap / minTotal > 0.6 then
+                            isSimilar = true
+                            similarReason = string.format("content overlap %.0f%% (%d/%d words)",
+                                overlap / minTotal * 100, overlap, minTotal)
+                        end
+                    end
+
+                    if isSimilar then
+                        -- Similar — swap the lower-scoring one
+                        Logger.warn(string.format(
+                            "  Similarity: beats %d & %d — %s",
+                            a.storyPosition or 0, b.storyPosition or 0, similarReason))
+
+                        -- Determine which to swap (lower composite score)
+                        local swapIdx = (a.compositeScore <= b.compositeScore) and i or j
+                        local swapEntry = finalSelection[swapIdx]
+                        local swapId = tostring(swapEntry.photo.localIdentifier)
+
+                        -- Find the beat index for this entry
+                        local swapBeatIdx = nil
+                        for bIdx, br in pairs(beatResults) do
+                            if br.primaryId == swapId then
+                                swapBeatIdx = bIdx
+                                break
+                            end
+                        end
+
+                        -- Try to use backup candidate
+                        local replaced = false
+                        if swapBeatIdx and beatResults[swapBeatIdx]
+                           and beatResults[swapBeatIdx].backupId
+                           and not usedIds[beatResults[swapBeatIdx].backupId] then
+                            local backupId = beatResults[swapBeatIdx].backupId
+                            -- Find backup entry in the candidate pool
+                            for _, e in ipairs(pool) do
+                                local eid = tostring(e.photo.localIdentifier)
+                                if eid == backupId then
+                                    -- Swap it in
+                                    usedIds[swapId] = nil
+                                    usedIds[backupId] = true
+                                    if photoSceneMap[backupId] then usedScenes[photoSceneMap[backupId]] = true end
+                                    local beat = beats[swapBeatIdx]
+                                    e.storyBeat     = beat.beat
+                                    e.storyRole     = beat.narrativeRole
+                                    e.storyNote     = beat.description
+                                    e.storyPosition = beat.position
+                                    finalSelection[swapIdx] = e
+                                    beatResults[swapBeatIdx].primaryId = backupId
+                                    replaced = true
+                                    similaritySwaps = similaritySwaps + 1
+                                    Logger.info(string.format(
+                                        "  Swapped beat %d: %s → backup %s (%s)",
+                                        beat.position, swapId, backupId, similarReason))
+                                    break
+                                end
+                            end
+                        end
+
+                        -- If AI backup unavailable, search candidate pool for any
+                        -- unused, non-similar photo as a deeper fallback.
+                        if not replaced and swapBeatIdx and candidatesByBeat[swapBeatIdx] then
+                            local keepEntry = finalSelection[swapIdx == i and j or i]
+                            for _, c in ipairs(candidatesByBeat[swapBeatIdx]) do
+                                local cid = tostring(c.id or c.photo and c.photo.localIdentifier)
+                                if not usedIds[cid] and c.phash and keepEntry.phash then
+                                    local cDist = Engine.hashDistance(c.phash, keepEntry.phash)
+                                    if cDist >= SIMILARITY_THRESHOLD then
+                                        -- Found an unused non-similar candidate
+                                        usedIds[swapId] = nil
+                                        usedIds[cid] = true
+                                        if photoSceneMap[cid] then usedScenes[photoSceneMap[cid]] = true end
+                                        local beat = beats[swapBeatIdx]
+                                        -- Find full pool entry for metadata
+                                        for _, pe in ipairs(pool) do
+                                            if tostring(pe.photo.localIdentifier) == cid then
+                                                pe.storyBeat     = beat.beat
+                                                pe.storyRole     = beat.narrativeRole
+                                                pe.storyNote     = beat.description
+                                                pe.storyPosition = beat.position
+                                                finalSelection[swapIdx] = pe
+                                                beatResults[swapBeatIdx].primaryId = cid
+                                                replaced = true
+                                                similaritySwaps = similaritySwaps + 1
+                                                Logger.info(string.format(
+                                                    "  Swapped beat %d: %s → pool candidate %s (phash distance %d)",
+                                                    beat.position, swapId, cid, cDist))
+                                                break
+                                            end
+                                        end
+                                        if replaced then break end
                                     end
                                 end
+                            end
+                        end
 
-                                -- Try to use backup candidate
-                                local replaced = false
-                                if swapBeatIdx and beatResults[swapBeatIdx]
-                                   and beatResults[swapBeatIdx].backupId
-                                   and not usedIds[beatResults[swapBeatIdx].backupId] then
-                                    local backupId = beatResults[swapBeatIdx].backupId
-                                    -- Find backup entry in the candidate pool
-                                    for _, e in ipairs(pool) do
-                                        local eid = tostring(e.photo.localIdentifier)
-                                        if eid == backupId then
-                                            -- Swap it in
-                                            usedIds[swapId] = nil
-                                            usedIds[backupId] = true
-                                            local beat = beats[swapBeatIdx]
-                                            e.storyBeat     = beat.beat
-                                            e.storyRole     = beat.narrativeRole
-                                            e.storyNote     = beat.description
-                                            e.storyPosition = beat.position
-                                            finalSelection[swapIdx] = e
-                                            beatResults[swapBeatIdx].primaryId = backupId
-                                            replaced = true
-                                            similaritySwaps = similaritySwaps + 1
-                                            Logger.info(string.format(
-                                                "  Swapped beat %d: %s → backup %s (phash distance %d)",
-                                                beat.position, swapId, backupId, dist))
-                                            break
+                        -- Last resort: search the ENTIRE pool for any unused,
+                        -- non-similar photo (not limited to this beat's candidates).
+                        -- Prefer photos matching the beat's category hint.
+                        if not replaced and swapBeatIdx then
+                            local keepEntry = finalSelection[swapIdx == i and j or i]
+                            local beatCat = beats[swapBeatIdx] and beats[swapBeatIdx].categoryHint
+                            local bestGlobal, bestGlobalScore = nil, -1
+                            for _, e in ipairs(pool) do
+                                local eid = tostring(e.photo.localIdentifier)
+                                if not usedIds[eid] and not e.reject and e.compositeScore then
+                                    -- Check phash dissimilarity
+                                    local dominated = false
+                                    if keepEntry.phash and e.phash then
+                                        local d = Engine.hashDistance(keepEntry.phash, e.phash)
+                                        if d < SIMILARITY_THRESHOLD then dominated = true end
+                                    end
+                                    -- Also check against ALL selected photos
+                                    if not dominated then
+                                        for _, sel in ipairs(finalSelection) do
+                                            if sel.phash and e.phash then
+                                                local d = Engine.hashDistance(sel.phash, e.phash)
+                                                if d < SIMILARITY_THRESHOLD then
+                                                    dominated = true; break
+                                                end
+                                            end
+                                        end
+                                    end
+                                    if not dominated then
+                                        local score = e.compositeScore
+                                        -- Boost for category match
+                                        if beatCat and e.category then
+                                            for _, hint in ipairs(beatCat) do
+                                                if e.category:lower() == hint:lower() then
+                                                    score = score + 2.0; break
+                                                end
+                                            end
+                                        end
+                                        if score > bestGlobalScore then
+                                            bestGlobal = e
+                                            bestGlobalScore = score
                                         end
                                     end
                                 end
+                            end
+                            if bestGlobal then
+                                local gid = tostring(bestGlobal.photo.localIdentifier)
+                                usedIds[swapId] = nil
+                                usedIds[gid] = true
+                                if photoSceneMap[gid] then usedScenes[photoSceneMap[gid]] = true end
+                                local beat = beats[swapBeatIdx]
+                                bestGlobal.storyBeat     = beat.beat
+                                bestGlobal.storyRole     = beat.narrativeRole
+                                bestGlobal.storyNote     = beat.description
+                                bestGlobal.storyPosition = beat.position
+                                finalSelection[swapIdx] = bestGlobal
+                                beatResults[swapBeatIdx].primaryId = gid
+                                replaced = true
+                                similaritySwaps = similaritySwaps + 1
+                                Logger.info(string.format(
+                                    "  Swapped beat %d: %s → global pool %s (score %.1f, cat=%s)",
+                                    beat.position, swapId, gid, bestGlobalScore,
+                                    bestGlobal.category or "?"))
+                            end
+                        end
 
-                                if not replaced then
-                                    Logger.warn(string.format(
-                                        "  No backup available for beat %d — keeping similar pair",
-                                        swapEntry.storyPosition or 0))
-                                end
+                        if not replaced then
+                            Logger.warn(string.format(
+                                "  No backup available for beat %d — keeping similar pair",
+                                swapEntry.storyPosition or 0))
+                        end
 
-                                swapped[swapIdx] = true
-                            end  -- timeDiff check
-                        end  -- dist check
-                    end  -- phash check
+                        swapped[swapIdx] = true
+                    end  -- isSimilar
                 end  -- not swapped[j]
             end  -- j loop
         end  -- not swapped[i]
@@ -2009,6 +2371,7 @@ local function selectStoryV3(pool, settings, catalog, snapshots, photoStore, pro
                                         -- Perform swap
                                         usedIds[currentId] = nil
                                         usedIds[newC.id] = true
+                                        if photoSceneMap[newC.id] then usedScenes[photoSceneMap[newC.id]] = true end
                                         local e = newC.entry
                                         e.storyBeat     = currentEntry.storyBeat
                                         e.storyRole     = currentEntry.storyRole
@@ -2076,8 +2439,9 @@ end
 -- Core selection logic. Exported for ScoreAndSelect.lua.
 -- overrides: optional table to override specific settings (from run dialog)
 -- snapshots: optional array of batch snapshots from scoring (for story mode)
+-- providedPhotos: optional array of LrPhoto (passed from ScoreAndSelect to avoid re-query)
 -- Returns summary string, or nil if no work done.
-local function runSelection(context, overrides, snapshots)
+local function runSelection(context, overrides, snapshots, providedPhotos)
     local SETTINGS = Prefs.getPrefs()
 
     -- Apply overrides from run dialog
@@ -2088,12 +2452,24 @@ local function runSelection(context, overrides, snapshots)
     end
 
     local catalog      = LrApplication.activeCatalog()
-    local targetPhotos = catalog:getTargetPhotos()
+    local targetPhotos = providedPhotos or catalog:getTargetPhotos()
 
     if #targetPhotos == 0 then
         LrDialogs.message("AI Selects",
             "No photos selected.\n\nSelect one or more photos in the Library grid and try again.", "info")
         return nil
+    end
+
+    -- If no snapshots provided (standalone Select), try loading from disk
+    if (not snapshots or #snapshots == 0) and SETTINGS.selectionMode == "story" then
+        local diskSnapshots, snapPath = loadSnapshotsFromDisk(SETTINGS)
+        if diskSnapshots then
+            snapshots = diskSnapshots
+            Logger.info("Loaded " .. #diskSnapshots .. " snapshots from disk: "
+                .. LrPathUtils.leafName(snapPath))
+        else
+            Logger.info("No snapshot file found on disk — story mode will use metadata only")
+        end
     end
 
     -- Progress scope
@@ -2136,7 +2512,7 @@ local function runSelection(context, overrides, snapshots)
             -- Use stored composite if available (already computed during scoring)
             e.compositeScore = e.composite
         else
-            -- Compute from dimensions (v1 migration path)
+            -- Compute composite from dimensions when not pre-stored
             local scores = {
                 technical   = e.technical,
                 composition = e.composition,
@@ -2156,6 +2532,7 @@ local function runSelection(context, overrides, snapshots)
     for _, e in ipairs(scored) do
         local id = e.photo.localIdentifier
         local captureTime = e.photo:getRawMetadata('dateTimeOriginal')
+            or e.photo:getRawMetadata('dateTime')
 
         -- Read EXIF data
         local exifParts = {}
@@ -2268,8 +2645,8 @@ local function runSelection(context, overrides, snapshots)
                 selected, groupOrder = selectBestOf(afterDedup, SETTINGS)
             end
         else
-            -- v2 fallback: no story prompt means user didn't go through mid-run dialog
-            Logger.info("Story mode: using v2 pipeline (no story prompt)")
+            -- Synthesis fallback: no story prompt means user didn't go through mid-run dialog
+            Logger.info("Story mode: using synthesis fallback (no story prompt)")
             progress:setCaption("Querying AI for narrative selection...")
             local storySelected, storyErr, storyGaps = selectStory(
                 afterDedup, SETTINGS, catalog, snapshots, progress)

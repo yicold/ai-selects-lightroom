@@ -2,7 +2,7 @@ return {
     LrSdkVersion        = 6.0,
     LrSdkMinimumVersion = 6.0,
 
-    LrToolkitIdentifier = 'com.sonoranstrategy.ai-selects',
+    LrToolkitIdentifier = 'io.github.gibbonsr4.ai-selects',
     LrPluginName        = 'AI Selects',
     LrPluginInfoUrl     = 'https://github.com/gibbonsr4/ai-selects-lightroom',
 

@@ -33,12 +33,11 @@ local DEFAULTS = {
     batchSize          = 0,            -- 0 = auto (provider default), or user override
     -- Story mode
     storyPreset            = "family_vacation",
-    storyCustomInstructions = "",
     -- Pre-scoring context (all modes)
-    preHints           = "",             -- e.g. "this is from 2007", "the older man is my dad"
+    preHints           = "",             -- e.g. "this is from 2007", "the man in green is the groom's father"
     -- Story prompt (confirmed by user after Pass 1)
     storyPrompt        = "",             -- user's confirmed story description
-    storyEmphasis      = "",             -- optional emphasis ("the dive was the highlight")
+    storyEmphasis      = "",             -- optional emphasis ("the speeches were the highlight")
     -- Logging
     enableLogging      = false,
     logFolder          = "",
@@ -87,7 +86,6 @@ local function getPrefs()
         nitpickyScale      = stringPref(prefs, "nitpickyScale"),
         batchSize          = numPref(prefs, "batchSize"),
         storyPreset            = stringPref(prefs, "storyPreset"),
-        storyCustomInstructions = stringPref(prefs, "storyCustomInstructions", true),
         preHints           = stringPref(prefs, "preHints", true),
         storyPrompt        = stringPref(prefs, "storyPrompt", true),
         storyEmphasis      = stringPref(prefs, "storyEmphasis", true),

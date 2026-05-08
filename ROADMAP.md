@@ -20,7 +20,7 @@ Updated 2026-03-14.
 - Composite score with configurable technical/aesthetic weights and eye quality adjustments
 - Perceptual hash (dHash) computed per photo for visual dedup
 - Skip-already-scored for incremental workflows
-- Pre-scoring hints for user context ("this is from 2007", "the older man is my dad")
+- Pre-scoring hints for user context ("this is from 2007", "the man in green is the groom's father")
 - Real-time API cost tracking per batch and cumulative
 
 ### Selection — Best Of
@@ -73,6 +73,24 @@ Pass prior batch snapshots to subsequent scoring batches so the AI builds cumula
 
 ### End-to-End Testing (#8)
 Passes 4-6 (Beat Casting, Story Review, Swap Resolution) need end-to-end testing against real photo sets.
+
+---
+
+## Watch List
+
+Behaviors to monitor on the new selection logic. Not bugs — judgment calls that may need tuning once we have run-data on real shoots.
+
+### Content-overlap similarity heuristic may be flaky
+[SelectPhotos.lua:1922-1950](AISelects.lrplugin/SelectPhotos.lua#L1922) extracts 3+ char alphabetic words from each photo's content description and flags similarity at >60% set overlap. Stopword list is tiny (`the/and/with/for/from/that`), so two photos sharing generic context words ("guests", "reception", "table") can trip it. Combined with the relaxed phash threshold (16→20) and 2× wider time window (5→10 min), the swap path is now noticeably more aggressive. Watch for over-swapping on event/wedding shoots; expand stopwords or raise overlap threshold if it fires too often.
+
+### `maxCandidates = 20` cap with relevant-first fill
+[SelectPhotos.lua:1364-1378](AISelects.lrplugin/SelectPhotos.lua#L1364): if 20 relevant candidates exist for a beat, generic fill never runs even when the relevant matches are weak. For beats with overly broad `prefer` keywords this can crowd out genuinely better photos. May want to raise the cap, or only count a candidate as "relevant" above some relevance threshold.
+
+### Standalone Select snapshot loader trusts newest file
+[SelectPhotos.lua:38-78](AISelects.lrplugin/SelectPhotos.lua#L38) picks the most recent `AI_Selects_Snapshots_*.json` from the log folder with no validation that it matches the current target photo set. Running standalone Select on a different selection will silently ingest stale snapshots. Add an ID/photoCount sanity check before trusting the file.
+
+### `logFolder + "/Selects Logs"` heuristic is brittle
+Both writer ([ScorePhotos.lua:838-841](AISelects.lrplugin/ScorePhotos.lua#L838)) and reader ([SelectPhotos.lua:46-49](AISelects.lrplugin/SelectPhotos.lua#L46)) probe for a `Selects Logs` subfolder and use it if present. Symmetric, so it works, but the destination depends on how the user happened to set `logFolder`. Consider a single canonical path.
 
 ---
 

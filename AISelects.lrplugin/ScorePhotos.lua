@@ -1,16 +1,15 @@
 --[[
   ScorePhotos.lua
   ---------------------------------------------------------------------------
-  Pass 1: Batch scoring pipeline.
+  Batch scoring pipeline.
 
   Sorts selected photos chronologically, forms batches, sends multi-image
   API calls with carryover anchors, writes 4-dimension scores + metadata,
-  extracts story snapshots.
+  and extracts story snapshots.
 
-  Can be invoked directly (menu item) or via ScoreAndSelect.lua which
+  Can be invoked directly (menu item) or via ScoreAndSelect.lua, which
   calls the exported runScoring(context, config) function.
 
-  v2: Replaces single-image scoring with relative batch ranking.
   macOS only.
 --]]
 
@@ -26,6 +25,8 @@ local LrTasks           = import 'LrTasks'
 local Engine        = dofile(_PLUGIN.path .. '/AIEngine.lua')
 local Prefs         = dofile(_PLUGIN.path .. '/Prefs.lua')
 local BatchStrategy = dofile(_PLUGIN.path .. '/BatchStrategy.lua')
+local json          = dofile(_PLUGIN.path .. '/dkjson.lua')
+local LrFileUtils   = import 'LrFileUtils'
 
 -- == Logger ===================================================================
 -- Writes incrementally so crash mid-run still captures everything up to that point.
@@ -65,7 +66,7 @@ function Logger:init(settings)
     self.fileHandle = fh
 
     self:log("===================================================================")
-    self:log("AI Selects v2 - Batch Scoring started at "
+    self:log("AI Selects - Batch Scoring started at "
         .. LrDate.timeToUserFormat(self.startTime, "%Y-%m-%d %H:%M:%S"))
     self:log("Provider: " .. settings.provider)
     if settings.provider == "ollama" then
@@ -153,7 +154,7 @@ end
 
 -- == Shared setup: validate photos, API keys, filter file types ===============
 -- Returns (SETTINGS, catalog, toProcess, skipped) or nil on error/cancel.
-local function validateAndPrepare(configOverride)
+local function validateAndPrepare(configOverride, providedPhotos)
     local SETTINGS = Prefs.getPrefs()
     -- Merge run dialog overrides on top of full settings
     if configOverride then
@@ -162,7 +163,7 @@ local function validateAndPrepare(configOverride)
         end
     end
     local catalog      = LrApplication.activeCatalog()
-    local targetPhotos = catalog:getTargetPhotos()
+    local targetPhotos = providedPhotos or catalog:getTargetPhotos()
 
     if #targetPhotos == 0 then
         LrDialogs.message("AI Selects",
@@ -235,9 +236,10 @@ end
 -- == Core batch scoring logic =================================================
 -- @param context       LrFunctionContext
 -- @param config        Optional settings override (from ScoreAndSelect.lua)
+-- @param targetPhotos  Optional array of LrPhoto objects (passed from ScoreAndSelect.lua)
 -- @return (successCount, errorCount, skippedCount, summary, snapshots) or nil
-local function runScoring(context, config)
-    local SETTINGS, catalog, toProcess, skipped = validateAndPrepare(config)
+local function runScoring(context, config, targetPhotos)
+    local SETTINGS, catalog, toProcess, skipped = validateAndPrepare(config, targetPhotos)
     if not SETTINGS then return nil end
 
     local providerLabel, modelName = getProviderInfo(SETTINGS)
@@ -289,6 +291,7 @@ local function runScoring(context, config)
         for _, batch in ipairs(batches) do
             for _, photo in ipairs(batch) do
                 local ct = photo:getRawMetadata('dateTimeOriginal')
+                    or photo:getRawMetadata('dateTime')
                 if ct then
                     captureTimes[#captureTimes + 1] = ct
                 else
@@ -390,6 +393,7 @@ local function runScoring(context, config)
             local filename = LrPathUtils.leafName(path)
             local id = tostring(photo.localIdentifier)
             local captureTime = photo:getRawMetadata('dateTimeOriginal')
+                or photo:getRawMetadata('dateTime')
             local timestamp = ""
             if captureTime then
                 timestamp = LrDate.timeToUserFormat(captureTime, "%Y-%m-%d %H:%M:%S")
@@ -488,11 +492,82 @@ local function runScoring(context, config)
         end
 
         if not rawResponse then
-            log:logBatch(batchIdx, totalBatches, #batch, "API error: " .. (queryErr or "unknown"))
-            for pos = 1, #images do
-                local info = photoByPosition[pos]
-                if info then
-                    errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  Batch API error: " .. (queryErr or "unknown")
+            -- Check if this is a content safety block — if so, retry photos individually
+            -- so only the offending photo(s) are lost instead of the whole batch.
+            local isSafetyBlock = queryErr and (
+                queryErr:find("PROHIBITED_CONTENT") or queryErr:find("SAFETY")
+                or queryErr:find("blockReason"))
+
+            if isSafetyBlock and #images > 1 then
+                log:log("  Content safety block on batch — retrying " .. #images .. " photos individually")
+                local retryScored = 0
+                local retryErrors = 0
+                for pos = 1, #images do
+                    local info = photoByPosition[pos]
+                    if not info then break end
+
+                    -- Build a single-photo prompt
+                    local singleIds = { info.id }
+                    local singleTimestamps = { photoTimestamps[pos] or "" }
+                    local singleExif = { photoExifData[pos] or "" }
+                    local singlePrompt = Engine.buildBatchScoringPrompt(
+                        singleIds, singleTimestamps, singleExif, {},
+                        SETTINGS.nitpickyScale, false, SETTINGS.preHints, allSnapshots
+                    )
+
+                    local singleResp, singleErr, singleStop = Engine.queryBatch(
+                        { images[pos] }, { imageLabels[pos] }, nil, nil,
+                        singlePrompt, SETTINGS, maxTokens
+                    )
+
+                    if singleResp then
+                        local singleScores, singleSnap = Engine.parseBatchResponse(singleResp, singleStop)
+                        if singleScores and #singleScores > 0 then
+                            local scoreEntry = singleScores[1]
+                            local composite = BatchStrategy.computeComposite(
+                                { technical = scoreEntry.technical, composition = scoreEntry.composition,
+                                  emotion = scoreEntry.emotion, moment = scoreEntry.moment },
+                                weights, scoreEntry.eye_quality
+                            )
+                            local phashTs = tostring(batchIdx) .. "_retry_" .. tostring(pos)
+                            local hashVal = Engine.computePhash(info.photo, phashTs)
+                            LrTasks.yield()
+                            local writeResult = writeScores(
+                                catalog, info.photo, scoreEntry, composite, hashVal, batchIdx, info.filename)
+                            LrTasks.yield()
+                            if writeResult == "executed" then
+                                retryScored = retryScored + 1
+                                successCount = successCount + 1
+                                allScores.technical[#allScores.technical + 1] = scoreEntry.technical
+                                allScores.composition[#allScores.composition + 1] = scoreEntry.composition
+                                allScores.emotion[#allScores.emotion + 1] = scoreEntry.emotion
+                                allScores.moment[#allScores.moment + 1] = scoreEntry.moment
+                                allScores.composite[#allScores.composite + 1] = composite
+                                log:log(string.format("  [RETRY OK] %s -> T:%d C:%d E:%d M:%d (%.1f)",
+                                    info.filename, scoreEntry.technical, scoreEntry.composition,
+                                    scoreEntry.emotion, scoreEntry.moment, composite))
+                            end
+                        else
+                            retryErrors = retryErrors + 1
+                            errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  Retry parse error"
+                            log:log("  [RETRY FAIL] " .. info.filename .. " — parse error")
+                        end
+                    else
+                        retryErrors = retryErrors + 1
+                        local reason = (singleErr or ""):find("PROHIBITED") and "content blocked" or (singleErr or "unknown")
+                        errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  " .. reason
+                        log:log("  [RETRY FAIL] " .. info.filename .. " — " .. reason)
+                    end
+                end
+                log:logBatch(batchIdx, totalBatches, #batch,
+                    string.format("Safety retry: %d scored, %d blocked", retryScored, retryErrors))
+            else
+                log:logBatch(batchIdx, totalBatches, #batch, "API error: " .. (queryErr or "unknown"))
+                for pos = 1, #images do
+                    local info = photoByPosition[pos]
+                    if info then
+                        errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  Batch API error: " .. (queryErr or "unknown")
+                    end
                 end
             end
             break  -- skip to next batch
@@ -745,6 +820,42 @@ local function runScoring(context, config)
     end
     if log.initError then
         lines[#lines + 1] = "\nLogging failed: " .. log.initError
+    end
+
+    -- Persist snapshots to disk so standalone Select can load them later.
+    -- Written to the same log folder as scoring logs.
+    if #allSnapshots > 0 then
+        local snapFolder = SETTINGS.logFolder
+        if not snapFolder or snapFolder == "" then
+            snapFolder = LrPathUtils.getStandardFilePath('documents')
+        end
+        -- Use a dedicated subfolder inside the log folder
+        local selFolder = LrPathUtils.child(snapFolder, "Selects Logs")
+        if LrFileUtils.exists(selFolder) then
+            snapFolder = selFolder
+        end
+        local snapTimestamp = LrDate.timeToUserFormat(LrDate.currentTime(), "%Y-%m-%d_%H-%M-%S")
+        local snapPath = LrPathUtils.child(snapFolder,
+            "AI_Selects_Snapshots_" .. snapTimestamp .. ".json")
+        local snapOk, snapErr = pcall(function()
+            local fh = io.open(snapPath, "w")
+            if fh then
+                fh:write(json.encode({
+                    version    = 1,
+                    timestamp  = snapTimestamp,
+                    provider   = provider,
+                    model      = modelName,
+                    photoCount = successCount + #errorLog,
+                    scored     = successCount,
+                    snapshots  = allSnapshots,
+                }, { indent = true }))
+                fh:close()
+                log:log("Snapshots saved to: " .. snapPath)
+            end
+        end)
+        if not snapOk then
+            log:log("Warning: failed to save snapshots: " .. tostring(snapErr))
+        end
     end
 
     return successCount, #errorLog, skippedScored, table.concat(lines, "\n"), allSnapshots

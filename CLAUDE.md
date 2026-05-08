@@ -32,7 +32,7 @@ Score (AI vision) → Reject → Burst Dedup → Phash Dedup → MODE SWITCH:
 - `Prefs.lua` — Default preference values.
 - `MetadataDefinition.lua` — 11 custom metadata fields, schemaVersion 4. **Critical: `browsable = true` requires `searchable = true`.**
 - `MetadataTagset.lua` — How fields appear in LR's Metadata panel.
-- `Info.lua` — Plugin manifest. LrToolkitIdentifier: `com.sonoranstrategy.ai-selects`.
+- `Info.lua` — Plugin manifest. LrToolkitIdentifier: `io.github.gibbonsr4.ai-selects`.
 - `dkjson.lua` — Bundled JSON library (do not modify).
 
 ## Provider Notes

@@ -41,7 +41,7 @@ local PROVIDER_CONFIG = {
         maxAnchors       = 2,
         supportsSnapshot = true,
         scoringMaxTokens = 4096,
-        synthesisMaxTokens = 16384,  -- Extra headroom: Gemini 2.5 thinking may leak tokens despite thinkingBudget=0
+        synthesisMaxTokens = 16384,  -- Extra headroom: Gemini thinking may leak tokens despite thinkingBudget=0
         defaultTimeout   = 180,
     },
 }
@@ -101,6 +101,7 @@ function M.formBatches(photos, provider, batchSizeOverride)
     local nameCache = {}
     for _, photo in ipairs(photos) do
         timeCache[photo] = photo:getRawMetadata('dateTimeOriginal')
+            or photo:getRawMetadata('dateTime')
         nameCache[photo] = photo:getFormattedMetadata('fileName') or ""
     end
 

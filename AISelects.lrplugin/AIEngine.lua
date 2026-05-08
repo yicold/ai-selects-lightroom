@@ -1,12 +1,10 @@
 --[[
   AIEngine.lua
   ---------------------------------------------------------------------------
-  Shared AI inference engine -- image rendering, API calls, score parsing.
+  Shared AI inference engine -- image rendering, API calls, score parsing,
+  perceptual hashing, prompt templates, JSON parsing with fallbacks.
   Used by ScorePhotos.lua and SelectPhotos.lua.
   Pure functions, no UI, no side effects beyond temp files.
-
-  v2: Multi-image batch scoring, 4-dimension scores, story snapshots,
-      synthesis prompt for story mode.
 --]]
 
 local LrApplication     = import 'LrApplication'
@@ -61,7 +59,8 @@ M.MODELS_JSON_URL =
     "https://raw.githubusercontent.com/gibbonsr4/ai-selects-lightroom/main/models.json"
 
 -- == Cost tracking ============================================================
--- Per-provider pricing (USD per 1M tokens). Updated as of 2025-03.
+-- Per-provider pricing (USD per 1M tokens). Updated as of 2026-05.
+-- Gemini Pro tiers list ≤200k-token rates; long-context (>200k) doubles.
 -- Vision input tokens are estimated from image size (provider-specific).
 local PRICING = {
     claude = {
@@ -81,10 +80,13 @@ local PRICING = {
         _default           = { input = 2.50, output = 10.00 },
     },
     gemini = {
-        ["gemini-2.5-flash"]   = { input = 0.15, output = 0.60 },
-        ["gemini-2.5-pro"]     = { input = 1.25, output = 10.00 },
-        ["gemini-2.0-flash"]   = { input = 0.10, output = 0.40 },
-        _default                = { input = 0.15, output = 0.60 },
+        ["gemini-2.5-flash"]              = { input = 0.30, output = 2.50 },
+        ["gemini-2.5-pro"]                = { input = 1.25, output = 10.00 },
+        ["gemini-2.0-flash"]              = { input = 0.10, output = 0.40 },
+        ["gemini-3-flash-preview"]        = { input = 0.50, output = 3.00 },
+        ["gemini-3.1-pro-preview"]        = { input = 2.00, output = 12.00 },
+        ["gemini-3.1-flash-lite-preview"] = { input = 0.25, output = 1.50 },
+        _default                           = { input = 0.30, output = 2.50 },
     },
 }
 
@@ -292,8 +294,8 @@ Rate each photo on four dimensions (1-10 scale):
 - moment: Peak timing, decisive instant vs throwaway. A hotel room or empty scene = 1-2. Generic activity = 4-5. A perfectly caught split-second = 9-10.
 
 Also provide for each photo:
-- content: 15-20 word description. Include: main subject, action/pose, setting, notable expressions, compositional approach. Be specific enough that someone could identify this exact photo from the description alone. Example: "Two young men grinning proudly, each gripping end of large mahi-mahi on boat stern, bright midday sun, ocean behind"
-- category: one of: landscape, portrait, wildlife, architecture, food, street, macro, event, nature, other
+- content: 15-20 word description. Include: main subject, action/pose, setting, notable expressions, compositional approach. Be specific enough that someone could identify this exact photo from the description alone. Example: "Bride and groom mid-laugh under string lights at outdoor reception, blurred guests cheering in background, warm tungsten light"
+- category: one of: landscape, portrait, wildlife, architecture, food, street, macro, event, nature, detail, other. Use "detail" for non-subject photos that capture texture, decor, settings, or objects (table settings, flowers, place cards, signage, rings, shoes, etc.)
 - eye_quality: for most prominent person (one of: good, fair, closed, na)
 - reject: true ONLY if obviously bad (severe blur, badly exposed, accidental shot)
 
@@ -375,13 +377,10 @@ end
 
 -- == Synthesis prompt template ================================================
 -- Used for story mode: text-only call with event blocks + photo metadata.
--- Replaces the old STORY_PROMPT_TEMPLATE.
 M.SYNTHESIS_PROMPT_TEMPLATE = [[You are an expert photo editor building a curated photo %PRESET_NAME% selection.
 
 ## Story Guidelines
 %GUIDELINES%
-
-%CUSTOM_INSTRUCTIONS%
 
 ## Event Timeline
 The photos span these events (derived from visual analysis of the actual images):
@@ -413,9 +412,7 @@ Return ONLY a JSON array of objects, each with:
 
 Return ONLY the JSON array. No explanation, no markdown, no commentary.]]
 
--- == Pass 2 refinement prompt template ========================================
--- Used for focused per-beat comparisons in story mode.
--- == v3 Story Prepopulation prompt ============================================
+-- == Story Prepopulation prompt ===============================================
 -- Text-only call to synthesize batch snapshots + metadata into a natural-language
 -- story summary that the user can edit in the mid-run dialog.
 M.PREPOPULATE_PROMPT_TEMPLATE = [[Based on the following photo collection analysis, write a 3-4 sentence natural language summary that describes this photo collection as if you're describing it to the photographer. Write in second person ("you"). Make it feel like a conversation, not a data dump.
@@ -576,6 +573,8 @@ Also include:
 - NO TWO BEATS should produce visually similar photos — every beat must describe a different visual scene (different people, different activity, different setting)
 - Include at least one quiet/candid/transitional moment (rest, food, travel, laughter between action) — these give the story texture and breathing room
 - Unique 1-photo moments from the inventory deserve strong consideration — they cannot be represented any other way
+
+%%BEAT_TYPE_BALANCE%%
 
 Return ONLY valid JSON. No explanation, no markdown, no commentary.
 
@@ -1578,13 +1577,23 @@ function M.queryGeminiBatch(images, imageLabels, anchorImages, anchorLabels,
         text = prompt,
     }
 
-    -- Gemini 2.5 models use "thinking" by default, which consumes output tokens.
-    -- Disable thinking for structured scoring to prevent response truncation.
-    local isThinkingModel = geminiModel:find("2%.5") ~= nil
+    -- Thinking model handling:
+    -- 2.5 Pro REQUIRES thinking (rejects thinkingBudget=0), so give it a small
+    -- budget and increase maxOutputTokens to compensate for thinking overhead.
+    -- 2.5 Flash and 3.x models accept thinkingBudget=0 to disable thinking.
+    local requiresThinking = geminiModel:find("2%.5%-pro") ~= nil
+    local canDisableThinking = (not requiresThinking) and (
+        geminiModel:find("2%.5") ~= nil
+        or geminiModel:find("3%-flash") ~= nil
+        or geminiModel:find("3%.1%-pro") ~= nil
+        or geminiModel:find("3%.1%-flash%-lite") ~= nil)
+    local baseTokens = maxTokens or 4096
     local genConfig = {
-        maxOutputTokens = maxTokens or 4096,
+        maxOutputTokens = requiresThinking and (baseTokens + 4096) or baseTokens,
     }
-    if isThinkingModel then
+    if requiresThinking then
+        genConfig.thinkingConfig = { thinkingBudget = 1024 }
+    elseif canDisableThinking then
         genConfig.thinkingConfig = { thinkingBudget = 0 }
     end
 
@@ -1636,6 +1645,11 @@ function M.queryGeminiBatch(images, imageLabels, anchorImages, anchorLabels,
             decoded.usageMetadata.candidatesTokenCount)
     end
 
+    -- Check for prompt-level content block (no candidates at all)
+    if decoded.promptFeedback and decoded.promptFeedback.blockReason then
+        return nil, "Gemini PROHIBITED_CONTENT: blockReason=" .. decoded.promptFeedback.blockReason
+    end
+
     -- finishReason: "STOP", "MAX_TOKENS", "SAFETY"
     local stopReason = decoded.candidates and decoded.candidates[1]
         and decoded.candidates[1].finishReason
@@ -1644,7 +1658,7 @@ function M.queryGeminiBatch(images, imageLabels, anchorImages, anchorLabels,
        and decoded.candidates[1].content
        and decoded.candidates[1].content.parts then
         local parts = decoded.candidates[1].content.parts
-        -- Gemini 2.5 models may include "thought" parts (thinking/reasoning).
+        -- Gemini 2.5+ models may include "thought" parts (thinking/reasoning).
         -- We need the LAST non-thought text part (the actual response).
         local lastText = nil
         for _, part in ipairs(parts) do
@@ -1702,9 +1716,9 @@ function M.queryBatch(images, imageLabels, anchorImages, anchorLabels, prompt, p
     end
 end
 
--- == Text-only API functions (for synthesis and Pass 2) =======================
--- These send text-only prompts (no images). Used for story synthesis and
--- Pass 2 refinement calls.
+-- == Text-only API functions ==================================================
+-- Send text-only prompts (no images). Used for scene inventory, story
+-- assembly, candidate ranking, story review, and synthesis-fallback calls.
 
 function M.queryOllamaText(prompt, modelName, ollamaUrl, timeoutSecs)
     local ts = tostring(math.floor(LrDate.currentTime() * 1000))
@@ -1868,13 +1882,21 @@ end
 function M.queryGeminiText(prompt, geminiModel, apiKey, timeoutSecs, maxTokens)
     local ts = tostring(math.floor(LrDate.currentTime() * 1000))
 
-    -- Gemini 2.5 models use "thinking" by default, which consumes output tokens.
-    -- Disable thinking for structured JSON responses to prevent truncation.
-    local isThinkingModel = geminiModel:find("2%.5") ~= nil
+    -- Thinking model handling: same logic as queryGeminiBatch.
+    -- 2.5 Pro requires thinking; 2.5 Flash and 3.x can disable it.
+    local requiresThinking = geminiModel:find("2%.5%-pro") ~= nil
+    local canDisableThinking = (not requiresThinking) and (
+        geminiModel:find("2%.5") ~= nil
+        or geminiModel:find("3%-flash") ~= nil
+        or geminiModel:find("3%.1%-pro") ~= nil
+        or geminiModel:find("3%.1%-flash%-lite") ~= nil)
+    local baseTokens = maxTokens or 8192
     local genConfig = {
-        maxOutputTokens = maxTokens or 8192,
+        maxOutputTokens = requiresThinking and (baseTokens + 4096) or baseTokens,
     }
-    if isThinkingModel then
+    if requiresThinking then
+        genConfig.thinkingConfig = { thinkingBudget = 1024 }
+    elseif canDisableThinking then
         genConfig.thinkingConfig = { thinkingBudget = 0 }
     end
 
@@ -1927,6 +1949,11 @@ function M.queryGeminiText(prompt, geminiModel, apiKey, timeoutSecs, maxTokens)
             decoded.usageMetadata.candidatesTokenCount)
     end
 
+    -- Check for prompt-level content block (no candidates at all)
+    if decoded.promptFeedback and decoded.promptFeedback.blockReason then
+        return nil, "Gemini PROHIBITED_CONTENT: blockReason=" .. decoded.promptFeedback.blockReason
+    end
+
     -- finishReason: "STOP", "MAX_TOKENS", "SAFETY"
     local stopReason = decoded.candidates and decoded.candidates[1]
         and decoded.candidates[1].finishReason
@@ -1934,7 +1961,7 @@ function M.queryGeminiText(prompt, geminiModel, apiKey, timeoutSecs, maxTokens)
     if decoded.candidates and decoded.candidates[1]
        and decoded.candidates[1].content
        and decoded.candidates[1].content.parts then
-        -- Gemini 2.5 models may include "thought" parts (thinking/reasoning).
+        -- Gemini 2.5+ models may include "thought" parts (thinking/reasoning).
         -- We need the LAST non-thought text part (the actual response).
         local lastText = nil
         for _, part in ipairs(decoded.candidates[1].content.parts) do
@@ -2483,7 +2510,7 @@ end
 -- == v3 Story assembly prompt builder ==========================================
 -- Builds the complete Pass 2 prompt from user story + rollup + snapshots + photos.
 -- @param userStoryPrompt  String: confirmed user story description
--- @param emphasis         String: optional emphasis ("the dive was the highlight")
+-- @param emphasis         String: optional emphasis ("the speeches were the highlight")
 -- @param eventTimeline    String: merged snapshot text (event blocks)
 -- @param rollup           Table: from buildMetadataRollup
 -- @param allPhotosText    String: formatted text of all photo metadata
@@ -2502,6 +2529,49 @@ function M.buildStoryAssemblyPrompt(userStoryPrompt, emphasis, eventTimeline, ro
 
     local rollupJson = json.encode(rollup)
 
+    -- Dynamic beat type balance based on actual category distribution
+    local beatBalanceText = ""
+    if rollup and rollup.categoryBreakdown then
+        local cats = rollup.categoryBreakdown
+        local total = rollup.totalPhotos or 0
+        -- Count people-centric categories
+        local peopleCats = (cats["portrait"] or 0) + (cats["event"] or 0)
+                         + (cats["street"] or 0)
+        local peoplePct = total > 0 and (peopleCats / total * 100) or 0
+        local hasPeople = rollup.people and next(rollup.people) ~= nil
+
+        if peoplePct >= 40 and hasPeople then
+            -- People-heavy collection (wedding, family, event, etc.)
+            local maxNonPeople = math.max(3, math.floor(targetCount * 0.2))
+            beatBalanceText = string.format(
+                "## Beat Type Balance — CRITICAL\n"
+                .. "This collection is people-centric (%.0f%% portrait/event/street). "
+                .. "The majority of beats MUST feature people. Non-people beats (detail, "
+                .. "scene_setter with no people) should be at most %d of %d total beats. "
+                .. "The remaining beats should show people in action, conversation, portraits, "
+                .. "or emotional moments. Detail shots (table settings, flowers, signage) add "
+                .. "texture but should NOT dominate — they are the seasoning, not the main course.",
+                peoplePct, maxNonPeople, targetCount)
+        elseif peoplePct <= 15 or not hasPeople then
+            -- Landscape/nature/architecture collection with few or no people
+            beatBalanceText = "## Beat Type Balance\n"
+                .. "This collection has few or no people-focused photos. "
+                .. "Prioritize visual variety across scenes, moods, and compositions. "
+                .. "Mix establishing shots, intimate details, textures, and sweeping vistas. "
+                .. "If people do appear, include them for human scale and story grounding, "
+                .. "but do not force people-centric beats when the content doesn't support it."
+        else
+            -- Mixed collection — balanced guidance
+            beatBalanceText = string.format(
+                "## Beat Type Balance\n"
+                .. "This collection has a mix of people and non-people content (%.0f%% people-focused). "
+                .. "Balance the story between people moments and environmental/detail shots "
+                .. "to reflect the actual content mix. Neither should dominate unless the "
+                .. "photographer's story description emphasizes one over the other.",
+                peoplePct)
+        end
+    end
+
     prompt = prompt:gsub("%%%%USER_STORY_PROMPT%%%%", function() return userStoryPrompt end)
     prompt = prompt:gsub("%%%%EMPHASIS%%%%", function() return emphasisText end)
     prompt = prompt:gsub("%%%%EVENT_TIMELINE%%%%", function() return eventTimeline end)
@@ -2509,6 +2579,7 @@ function M.buildStoryAssemblyPrompt(userStoryPrompt, emphasis, eventTimeline, ro
     prompt = prompt:gsub("%%%%SCENE_INVENTORY%%%%", function() return sceneText end)
     prompt = prompt:gsub("%%%%ALL_PHOTOS%%%%", function() return allPhotosText end)
     prompt = prompt:gsub("%%%%TARGET_COUNT%%%%", function() return tostring(targetCount) end)
+    prompt = prompt:gsub("%%%%BEAT_TYPE_BALANCE%%%%", function() return beatBalanceText end)
 
     return prompt
 end

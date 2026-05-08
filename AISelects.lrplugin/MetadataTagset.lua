@@ -21,27 +21,27 @@ return {
 
         'com.adobe.separator',
 
-        -- AI Selects scores (v2: 4 dimensions + composite)
-        { 'com.sonoranstrategy.ai-selects.aiSelectsComposite',    label = 'Composite Score'   },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsTechnical',    label = 'Technical'         },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsComposition',  label = 'Composition'       },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsEmotion',      label = 'Emotion'           },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsMoment',       label = 'Moment'            },
+        -- AI Selects scores (4 dimensions + composite)
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsComposite',    label = 'Composite Score'   },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsTechnical',    label = 'Technical'         },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsComposition',  label = 'Composition'       },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsEmotion',      label = 'Emotion'           },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsMoment',       label = 'Moment'            },
 
         'com.adobe.separator',
 
         -- Descriptive fields
-        { 'com.sonoranstrategy.ai-selects.aiSelectsContent',       label = 'Content'          },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsCategory',      label = 'Category'         },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsEyeQuality',   label = 'Eye Quality'      },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsNarrativeRole', label = 'Narrative Role'   },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsReject',        label = 'Reject'           },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsScoreDate',     label = 'Score Date'       },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsContent',       label = 'Content'          },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsCategory',      label = 'Category'         },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsEyeQuality',   label = 'Eye Quality'      },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsNarrativeRole', label = 'Narrative Role'   },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsReject',        label = 'Reject'           },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsScoreDate',     label = 'Score Date'       },
 
         'com.adobe.separator',
 
         -- Story mode fields (populated during narrative selection)
-        { 'com.sonoranstrategy.ai-selects.aiSelectsSequence',     label = 'Sequence'          },
-        { 'com.sonoranstrategy.ai-selects.aiSelectsStoryNote',    label = 'Story Note'        },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsSequence',     label = 'Sequence'          },
+        { 'io.github.gibbonsr4.ai-selects.aiSelectsStoryNote',    label = 'Story Note'        },
     },
 }

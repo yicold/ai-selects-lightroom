@@ -2,7 +2,7 @@ return {
     schemaVersion = 5,
 
     metadataFieldsForPhotos = {
-        -- ── Scoring dimensions (v2: 4 dimensions) ──────────────────────────
+        -- ── Scoring dimensions ──────────────────────────────────────────────
         {
             id         = 'aiSelectsTechnical',
             dataType   = 'string',
@@ -111,15 +111,6 @@ return {
             id         = 'aiSelectsStoryNote',
             dataType   = 'string',
             title      = 'AI Selects: Story Note',
-            searchable = true,
-            browsable  = true,
-        },
-
-        -- ── Deprecated (v1 migration — preserved for read-back) ────────────
-        {
-            id         = 'aiSelectsAesthetic',
-            dataType   = 'string',
-            title      = 'AI Selects: Aesthetic Score (v1)',
             searchable = true,
             browsable  = true,
         },

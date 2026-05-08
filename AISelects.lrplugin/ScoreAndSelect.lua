@@ -3,11 +3,11 @@
   ─────────────────────────────────────────────────────────────────────────────
   Primary entry point for AI Selects. Shows a run configuration dialog with
   mode, story settings, scoring quality, emphasis slider, and target count,
-  then runs Pass 1 (Score) followed by Pass 2 (Select) sequentially.
+  then runs Score followed by Select sequentially.
 
-  v2: Nitpicky scale replaces calibration. Emphasis slider replaces
-      percentage input. Pass 2 refinement checkbox for story mode.
-      Batch size override. Snapshots flow from scoring into story selection.
+  In Story mode, a mid-run dialog after scoring lets the user confirm a
+  story prompt (with AI-prepopulated summary) before selection runs.
+  Snapshots flow from scoring into the selection pass.
 
   Settings from the run dialog are saved to prefs so they persist between runs.
   Provider/model/logging configuration is in Settings (Config.lua).
@@ -54,7 +54,6 @@ local function showRunDialog(context)
     props.emphasisSlider         = current.emphasisSlider or 50
     props.nitpickyScale          = current.nitpickyScale or "consumer"
     props.storyPreset            = current.storyPreset or "family_vacation"
-    props.storyCustomInstructions = current.storyCustomInstructions or ""  -- v2 fallback only
     props.skipScored             = current.skipScored or false
     props.batchSize              = tostring(current.batchSize or 0)
     props.preHints               = current.preHints or ""
@@ -178,8 +177,6 @@ local function showRunDialog(context)
                     width_in_chars  = 50,
                 },
             },
-            -- (v2 "Additional instructions" field and "Refine selections" checkbox
-            -- removed — replaced by preHints + v3 story dialog)
         },
 
         -- ═══════════════════════════════════════════════════════════
@@ -307,7 +304,7 @@ local function showRunDialog(context)
                     width = LrView.share("run_label_width"),
                 },
                 f:static_text {
-                    title      = "Optional hints for scoring. E.g., \"the older man is my dad\", \"this is from 2007\".",
+                    title      = "Optional hints for scoring. E.g., \"the man in the green shirt is the groom's father\", \"this is from 2007\".",
                     text_color = LrView.kDisabledColor,
                 },
             },
@@ -399,7 +396,7 @@ local function showRunDialog(context)
         },
     }
 
-    if result ~= "ok" then return nil end
+    if result ~= "ok" then return nil, nil end
 
     -- Save run dialog settings back to prefs
     local prefs = LrPrefs.prefsForPlugin()
@@ -408,23 +405,22 @@ local function showRunDialog(context)
     prefs.emphasisSlider         = math.floor(props.emphasisSlider)
     prefs.nitpickyScale          = props.nitpickyScale
     prefs.storyPreset            = props.storyPreset
-    prefs.storyCustomInstructions = props.storyCustomInstructions  -- v2 fallback only
     prefs.skipScored             = props.skipScored
     prefs.batchSize              = math.floor(tonumber(props.batchSize) or 0)
     prefs.preHints               = props.preHints
 
-    -- Return overrides for scoring and selection passes
+    -- Return overrides for scoring and selection passes, plus targetPhotos
+    -- so the entire pipeline uses the same set of photos captured at dialog time.
     return {
         selectionMode          = props.selectionMode,
         targetCount            = math.floor(tonumber(props.targetCount)),
         emphasisSlider         = math.floor(props.emphasisSlider),
         nitpickyScale          = props.nitpickyScale,
         storyPreset            = props.storyPreset,
-        storyCustomInstructions = props.storyCustomInstructions,  -- v2 fallback only
         skipScored             = props.skipScored,
         batchSize              = math.floor(tonumber(props.batchSize) or 0),
         preHints               = props.preHints,
-    }
+    }, targetPhotos
 end
 
 -- ── Mid-run story dialog (shown after Pass 1, story mode only) ───────────
@@ -505,7 +501,7 @@ local function showStoryDialog(context, prepopulatedSummary, draftPrompt, curren
         },
 
         f:static_text {
-            title      = "E.g., \"the dive was the highlight\", \"make sure Mom is well represented\".",
+            title      = "E.g., \"the speeches were the highlight\", \"make sure the bridal party is well represented\".",
             text_color = LrView.kDisabledColor,
         },
     }
@@ -530,9 +526,9 @@ local Prefs2    -- loaded in main execution section
 -- ── Build photoStore from catalog (for mid-run dialog) ───────────────────
 -- Reads scored metadata from the active catalog to build a photoStore table.
 -- This is a lightweight version used between Pass 1 and story dialog.
-local function buildPhotoStoreFromCatalog()
+local function buildPhotoStoreFromCatalog(providedPhotos)
     local catalog = LrApplication.activeCatalog()
-    local targetPhotos = catalog:getTargetPhotos()
+    local targetPhotos = providedPhotos or catalog:getTargetPhotos()
     local store = {}
 
     for _, photo in ipairs(targetPhotos) do
@@ -545,6 +541,7 @@ local function buildPhotoStoreFromCatalog()
             if composition then
                 local id = photo.localIdentifier
                 local captureTime = photo:getRawMetadata('dateTimeOriginal')
+                    or photo:getRawMetadata('dateTime')
 
                 store[id] = {
                     photo       = photo,
@@ -596,13 +593,14 @@ _G._AI_SELECTS_MODULE_LOAD = nil  -- clean up
 LrTasks.startAsyncTask(function()
     LrFunctionContext.callWithContext("AISelectsScoreAndSelect", function(context)
 
-        -- Show run config dialog
-        local overrides = showRunDialog(context)
+        -- Show run config dialog (also captures targetPhotos at dialog time)
+        local overrides, targetPhotos = showRunDialog(context)
         if not overrides then return end  -- user canceled
 
         -- Pass 1: Score (batch scoring with snapshots)
+        -- Pass targetPhotos so the same set is used throughout the pipeline.
         local successCount, errorCount, skipCount, scoreSummary, allSnapshots =
-            ScoreModule.runScoring(context, overrides)
+            ScoreModule.runScoring(context, overrides, targetPhotos)
 
         if not scoreSummary then
             return  -- user canceled or no photos
@@ -617,7 +615,7 @@ LrTasks.startAsyncTask(function()
         -- ── Story mode: mid-run dialog (after Pass 1, before selection) ──
         if overrides.selectionMode == "story" then
             -- Build photoStore from freshly scored catalog data
-            local photoStore = buildPhotoStoreFromCatalog()
+            local photoStore = buildPhotoStoreFromCatalog(targetPhotos)
 
             -- Merge full prefs with overrides for AI calls
             local fullPrefs = Prefs2.getPrefs()
@@ -656,8 +654,8 @@ LrTasks.startAsyncTask(function()
             prefs.storyEmphasis = storyEmphasis
         end
 
-        -- Selection pass (with overrides, snapshots, and story prompt if story mode)
-        local selectSummary = SelectModule.runSelection(context, overrides, allSnapshots)
+        -- Selection pass (with overrides, snapshots, story prompt, and same targetPhotos)
+        local selectSummary = SelectModule.runSelection(context, overrides, allSnapshots, targetPhotos)
 
         if selectSummary then
             LrDialogs.message("AI Selects - Selection Complete", selectSummary, "info")

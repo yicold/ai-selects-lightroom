@@ -462,8 +462,11 @@ LrTasks.startAsyncTask(function()
                     f:popup_menu {
                         value = LrView.bind("geminiModel"),
                         items = {
-                            { title = "Gemini 2.5 Flash (~$0.002/image)",               value = "gemini-2.5-flash" },
                             { title = "Gemini 3.1 Flash Lite (~$0.001/image, preview)",  value = "gemini-3.1-flash-lite-preview" },
+                            { title = "Gemini 2.5 Flash (~$0.002/image)",                value = "gemini-2.5-flash" },
+                            { title = "Gemini 3 Flash (~$0.003/image, preview)",          value = "gemini-3-flash-preview" },
+                            { title = "Gemini 2.5 Pro (~$0.01/image)",                   value = "gemini-2.5-pro" },
+                            { title = "Gemini 3.1 Pro (~$0.015/image, preview)",          value = "gemini-3.1-pro-preview" },
                         },
                     },
                 },
