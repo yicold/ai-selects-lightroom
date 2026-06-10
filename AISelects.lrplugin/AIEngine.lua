@@ -16,6 +16,7 @@ local LrTasks           = import 'LrTasks'
 
 local json = dofile(_PLUGIN.path .. '/dkjson.lua')
 local BatchStrategy = dofile(_PLUGIN.path .. '/BatchStrategy.lua')
+local Platform = dofile(_PLUGIN.path .. '/Platform.lua')
 
 local M = {}
 
@@ -871,8 +872,9 @@ function M.getInstalledModels(ollamaUrl)
     cfh:write("max-time = 5\n")
     cfh:close()
 
-    local cmd = string.format("curl -K %s -o %s", M.shellEscape(tmpCfg), M.shellEscape(tmpOut))
-    local exitCode = LrTasks.execute(cmd)
+    -- [Windows] Replaced direct curl call with Platform abstraction
+    local result = Platform.executeCommand("http", {tmpCfg, tmpOut})
+    local exitCode = result.success and 0 or 1
 
     if exitCode == 0 then
         local rf = io.open(tmpOut, "r")
@@ -920,8 +922,9 @@ function M.fetchRemoteModels()
     cfh:write("max-time = 5\n")
     cfh:close()
 
-    local cmd = string.format("curl -K %s -o %s", M.shellEscape(tmpCfg), M.shellEscape(tmpOut))
-    local exitCode = LrTasks.execute(cmd)
+    -- [Windows] Replaced direct curl call with Platform abstraction
+    local result = Platform.executeCommand("http", {tmpCfg, tmpOut})
+    local exitCode = result.success and 0 or 1
 
     if exitCode == 0 then
         local rf = io.open(tmpOut, "r")
@@ -1200,11 +1203,9 @@ function M.writeCurlConfig(cfgPath, url, headers, timeoutSecs)
 end
 
 function M.curlPost(cfgPath, tmpIn, tmpOut, imgSize, timeoutSecs)
-    local curlCmd = string.format(
-        "curl -K %s -d @%s -o %s",
-        M.shellEscape(cfgPath), M.shellEscape(tmpIn), M.shellEscape(tmpOut)
-    )
-    local rawExit = LrTasks.execute(curlCmd)
+    -- [Windows] Replaced curl execution with Platform abstraction
+    local result = Platform.executeCommand("http", {cfgPath, tmpIn, tmpOut})
+    local rawExit = result.success and 0 or 256
 
     local result = nil
     local rf = io.open(tmpOut, "r")
