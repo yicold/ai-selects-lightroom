@@ -15,7 +15,7 @@
   Can be invoked directly (as a menu item) or via ScoreAndSelect.lua, which
   calls the exported runSelection(context, overrides) function.
 
-  macOS only. Settings via Library > Plugin Extras > Settings...
+  macOS and Windows. Settings via Library > Plugin Extras > Settings...
 --]]
 
 -- ── LR SDK imports ─────────────────────────────────────────────────────────
@@ -31,6 +31,7 @@ local json          = dofile(_PLUGIN.path .. '/dkjson.lua')
 local Prefs         = dofile(_PLUGIN.path .. '/Prefs.lua')
 local Engine        = dofile(_PLUGIN.path .. '/AIEngine.lua')
 local BatchStrategy = dofile(_PLUGIN.path .. '/BatchStrategy.lua')
+local Platform      = dofile(_PLUGIN.path .. '/Platform.lua')
 local LrFileUtils   = import 'LrFileUtils'
 
 -- ── Load most recent snapshots file from disk ─────────────────────────────
