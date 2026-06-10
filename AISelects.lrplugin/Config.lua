@@ -16,6 +16,7 @@ local LrView            = import 'LrView'
 local Prefs    = dofile(_PLUGIN.path .. '/Prefs.lua')
 local DEFAULTS = Prefs.DEFAULTS
 local Engine   = dofile(_PLUGIN.path .. '/AIEngine.lua')
+local Platform = dofile(_PLUGIN.path .. '/Platform.lua')
 
 -- Convenience aliases for Engine functions used throughout
 local isOllamaInstalled = Engine.isOllamaInstalled
@@ -38,9 +39,9 @@ local function getOllamaVersion(ollamaUrl)
     cfh:write("max-time = 3\n")
     cfh:close()
 
-    local cmd = string.format("curl -K %s -o %s",
-        Engine.shellEscape(tmpCfg), Engine.shellEscape(tmpOut))
-    local exitCode = LrTasks.execute(cmd)
+    -- [Windows] Replaced direct curl call with Platform abstraction
+    local result = Platform.executeCommand("http", {tmpCfg, tmpOut})
+    local exitCode = result.success and 0 or 1
 
     if exitCode == 0 then
         local rf = io.open(tmpOut, "r")
@@ -61,6 +62,32 @@ local function getOllamaVersion(ollamaUrl)
     pcall(function() LrFileUtils.delete(tmpCfg) end)
     pcall(function() LrFileUtils.delete(tmpOut) end)
     return nil
+end
+
+-- ── Check Windows dependencies ──────────────────────────────────────────────
+local function checkWindowsDependencies()
+    if not Platform.isWindows() then
+        return { success = true, missing = {} }
+    end
+
+    local missing = {}
+
+    -- Check ImageMagick
+    local magickResult = LrTasks.execute('where magick 2>nul')
+    if magickResult ~= 0 then
+        table.insert(missing, "ImageMagick")
+    end
+
+    -- Check sqlite3
+    local sqliteResult = LrTasks.execute('where sqlite3 2>nul')
+    if sqliteResult ~= 0 then
+        table.insert(missing, "sqlite3")
+    end
+
+    return {
+        success = (#missing == 0),
+        missing = missing
+    }
 end
 
 -- ── Build model dropdown items ────────────────────────────────────────────
@@ -611,6 +638,28 @@ LrTasks.startAsyncTask(function()
                     },
                 },
             },
+
+            -- ═══════════════════════════════════════════════════════════
+            -- WINDOWS DEPENDENCIES (Windows only)
+            -- ═══════════════════════════════════════════════════════════
+            Platform.isWindows() and f:row {
+                f:static_text {
+                    title = "",
+                    width = LrView.share("label_width"),
+                },
+                f:push_button {
+                    title = "Verify Windows Dependencies",
+                    action = function()
+                        local result = checkWindowsDependencies()
+                        if result.success then
+                            LrDialogs.message("Dependencies OK", "All required dependencies are installed.", "info")
+                        else
+                            local msg = "Missing dependencies:\n" .. table.concat(result.missing, "\n")
+                            LrDialogs.message("Missing Dependencies", msg, "critical")
+                        end
+                    end
+                }
+            } or f:row {},
 
             -- ═══════════════════════════════════════════════════════════
             -- VALIDATION MESSAGE
