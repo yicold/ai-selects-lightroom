@@ -10,7 +10,7 @@
   Can be invoked directly (menu item) or via ScoreAndSelect.lua, which
   calls the exported runScoring(context, config) function.
 
-  macOS only.
+  macOS and Windows.
 --]]
 
 -- == LR SDK imports ===========================================================
@@ -26,6 +26,7 @@ local Engine        = dofile(_PLUGIN.path .. '/AIEngine.lua')
 local Prefs         = dofile(_PLUGIN.path .. '/Prefs.lua')
 local BatchStrategy = dofile(_PLUGIN.path .. '/BatchStrategy.lua')
 local json          = dofile(_PLUGIN.path .. '/dkjson.lua')
+local Platform      = dofile(_PLUGIN.path .. '/Platform.lua')
 local LrFileUtils   = import 'LrFileUtils'
 
 -- == Logger ===================================================================
