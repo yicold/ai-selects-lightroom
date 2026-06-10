@@ -18,12 +18,22 @@ Existing culling tools handle "thousands → hundreds." This is aimed at "hundre
 - **Story presets** — Wedding, Family Vacation, Documentary Travel, Portrait Session, Editorial, Landscape Portfolio, Fun/Playful, Custom
 - **Cost tracking** — per-pass API cost tracking with cumulative totals
 - **Non-destructive** — creates a Collection; never modifies or deletes originals
-- **No extra tools to install** — uses macOS built-ins (`sips`, `sqlite3`, `curl`); you still bring your own AI provider (see Requirements)
+- **No extra tools to install** — uses macOS built-ins (`sips`, `sqlite3`, `curl`); Windows requires ImageMagick and sqlite3 (see [Windows Installation Guide](docs/WINDOWS_INSTALL.md))
+- **Cross-platform** — supports both macOS and Windows 11
 
 ## Requirements
 
-- macOS (uses `sips`, `sqlite3`, and `curl` — all built-in)
+### Platform
+
+- **macOS** — uses built-in tools (`sips`, `sqlite3`, `curl`)
+- **Windows 11** — requires ImageMagick 7.0+ and sqlite3 (see [Windows Installation Guide](docs/WINDOWS_INSTALL.md))
+
+### Software
+
 - Lightroom Classic (SDK 6.0+)
+
+### AI Provider
+
 - One of:
   - **Ollama** installed locally with a vision model — free, private, no API key needed (lower quality)
   - **Anthropic API key** for Claude
@@ -32,10 +42,22 @@ Existing culling tools handle "thousands → hundreds." This is aimed at "hundre
 
 ## Installation
 
+### macOS
+
 1. Download or clone this repository
 2. In Lightroom Classic, go to **File > Plug-in Manager**
 3. Click **Add** and navigate to the `AISelects.lrplugin` folder
 4. Click **Done**
+
+### Windows 11
+
+See [Windows Installation Guide](docs/WINDOWS_INSTALL.md) for detailed setup instructions.
+
+Quick start:
+1. Install ImageMagick 7.0+ and sqlite3
+2. Configure PowerShell execution policy
+3. Install plugin in Lightroom
+4. Verify dependencies in plugin settings
 
 The plugin appears under **Library > Plug-in Extras** with four menu items.
 
