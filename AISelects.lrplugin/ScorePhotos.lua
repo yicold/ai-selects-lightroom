@@ -209,7 +209,14 @@ local function validateAndPrepare(configOverride, providedPhotos)
     end
 
     -- Clean up orphaned temp files from interrupted runs
-    LrTasks.execute("rm -f /tmp/ai_sel_req_* /tmp/ai_sel_resp_* /tmp/ai_sel_cfg_* 2>/dev/null")
+    if Platform.isWindows() then
+        local tmpDir = Platform.getTempDir()
+        LrTasks.execute("powershell.exe -Command \"Remove-Item -Path '" .. tmpDir .. "\\ai_sel_req_*' -Force -ErrorAction SilentlyContinue\"")
+        LrTasks.execute("powershell.exe -Command \"Remove-Item -Path '" .. tmpDir .. "\\ai_sel_resp_*' -Force -ErrorAction SilentlyContinue\"")
+        LrTasks.execute("powershell.exe -Command \"Remove-Item -Path '" .. tmpDir .. "\\ai_sel_cfg_*' -Force -ErrorAction SilentlyContinue\"")
+    else
+        LrTasks.execute("rm -f /tmp/ai_sel_req_* /tmp/ai_sel_resp_* /tmp/ai_sel_cfg_* 2>/dev/null")
+    end
 
     return SETTINGS, catalog, toProcess, skipped
 end
@@ -471,7 +478,8 @@ local function runScoring(context, config, targetPhotos)
         -- 3. Build the scoring prompt (pass prior snapshots for narrative context)
         local prompt = Engine.buildBatchScoringPrompt(
             photoIds, photoTimestamps, photoExifData, anchors,
-            SETTINGS.nitpickyScale, includeSnapshots, SETTINGS.preHints, allSnapshots
+            SETTINGS.nitpickyScale, includeSnapshots, SETTINGS.preHints, allSnapshots,
+            SETTINGS.enableChineseOutput
         )
 
         log:log(string.format("  Prompt length: %d chars, %d images + %d anchors",
@@ -513,7 +521,8 @@ local function runScoring(context, config, targetPhotos)
                     local singleExif = { photoExifData[pos] or "" }
                     local singlePrompt = Engine.buildBatchScoringPrompt(
                         singleIds, singleTimestamps, singleExif, {},
-                        SETTINGS.nitpickyScale, false, SETTINGS.preHints, allSnapshots
+                        SETTINGS.nitpickyScale, false, SETTINGS.preHints, allSnapshots,
+                        SETTINGS.enableChineseOutput
                     )
 
                     local singleResp, singleErr, singleStop = Engine.queryBatch(
