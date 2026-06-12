@@ -1927,6 +1927,10 @@ function M.queryBatch(images, imageLabels, anchorImages, anchorLabels, prompt, p
     elseif provider == "gemini" then
         return M.queryGeminiBatch(images, imageLabels, anchorImages, anchorLabels,
             prompt, prefs.geminiModel, prefs.geminiApiKey, maxTokens, timeout)
+    elseif provider == "openai-compatible" then
+        return M.queryOpenAICompatibleBatch(images, imageLabels, anchorImages, anchorLabels,
+            prompt, prefs.openaiCompatibleModel, prefs.openaiCompatibleApiKey,
+            prefs.openaiCompatibleBaseUrl, maxTokens, timeout)
     else
         return nil, "Unknown provider: " .. tostring(provider)
     end
