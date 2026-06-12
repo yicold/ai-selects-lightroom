@@ -1628,6 +1628,121 @@ function M.queryOpenAIBatch(images, imageLabels, anchorImages, anchorLabels,
     return nil, "Unexpected OpenAI response: " .. tostring(result):sub(1, 200)
 end
 
+-- == Multi-image batch query: OpenAI-Compatible ==============================
+-- OpenAI-Compatible uses image_url content blocks with base64 data URIs.
+-- Accepts a baseUrl parameter instead of hardcoding api.openai.com.
+function M.queryOpenAICompatibleBatch(images, imageLabels, anchorImages, anchorLabels,
+                            prompt, openaiModel, apiKey, baseUrl, maxTokens, timeoutSecs)
+    local ts = tostring(math.floor(LrDate.currentTime() * 1000))
+
+    local content = {}
+    local totalSize = 0
+
+    -- Anchor images first — label BEFORE image for reliable association
+    if anchorImages then
+        content[#content + 1] = {
+            type = "text",
+            text = "=== REFERENCE ANCHORS (already scored, DO NOT re-score) ===",
+        }
+        for i, img in ipairs(anchorImages) do
+            content[#content + 1] = {
+                type = "text",
+                text = anchorLabels[i] or string.format("[Anchor %d]", i),
+            }
+            content[#content + 1] = {
+                type      = "image_url",
+                image_url = {
+                    url    = "data:image/jpeg;base64," .. img.base64,
+                    detail = "low",
+                },
+            }
+            totalSize = totalSize + img.fileSize
+        end
+        content[#content + 1] = {
+            type = "text",
+            text = "=== NEW PHOTOS TO SCORE (return scores for these only) ===",
+        }
+    end
+
+    -- New photos — label BEFORE image
+    for i, img in ipairs(images) do
+        content[#content + 1] = {
+            type = "text",
+            text = imageLabels[i] or string.format("[Photo %d]", i),
+        }
+        content[#content + 1] = {
+            type      = "image_url",
+            image_url = {
+                url    = "data:image/jpeg;base64," .. img.base64,
+                detail = "low",
+            },
+        }
+        totalSize = totalSize + img.fileSize
+    end
+
+    -- Prompt as final text block
+    content[#content + 1] = {
+        type = "text",
+        text = prompt,
+    }
+
+    local encodeOk, body = pcall(json.encode, {
+        model      = openaiModel,
+        max_tokens = maxTokens or 4096,
+        messages   = {{
+            role    = "user",
+            content = content,
+        }}
+    })
+    if not encodeOk then return nil, "JSON encode failed: " .. tostring(body) end
+
+    local cleanKey = apiKey:gsub("%s+", "")
+    local cleanUrl = baseUrl:gsub("/$", "")
+
+    local tmpCfg = M.TEMP_DIR .. "/ai_sel_cfg_" .. ts .. ".txt"
+    local tmpIn  = M.TEMP_DIR .. "/ai_sel_req_" .. ts .. ".json"
+    local tmpOut = M.TEMP_DIR .. "/ai_sel_resp_" .. ts .. ".json"
+
+    if not M.writeCurlConfig(tmpCfg, cleanUrl .. "/chat/completions", {
+        "Authorization: Bearer " .. cleanKey,
+        "Content-Type: application/json",
+    }, timeoutSecs) then
+        return nil, "Could not write curl config file"
+    end
+
+    local fh = io.open(tmpIn, "w")
+    if not fh then return nil, "Could not write temp file: " .. tmpIn end
+    fh:write(body); fh:close()
+
+    local result, err = M.curlPost(tmpCfg, tmpIn, tmpOut, totalSize, timeoutSecs)
+    if not result then return nil, err end
+
+    local ok, decoded = pcall(function() return json.decode(result) end)
+    if not ok or type(decoded) ~= "table" then
+        return nil, "Could not parse OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
+    end
+
+    if decoded.error then
+        return nil, "OpenAI-Compatible API error: " .. (decoded.error.message or "Unknown")
+    end
+
+    -- Extract usage for cost tracking
+    if decoded.usage then
+        recordUsage("openai-compatible", openaiModel,
+            decoded.usage.prompt_tokens, decoded.usage.completion_tokens)
+    end
+
+    -- finish_reason: "stop", "length" (= max tokens hit)
+    local stopReason = decoded.choices and decoded.choices[1]
+        and decoded.choices[1].finish_reason
+
+    if decoded.choices and decoded.choices[1] and decoded.choices[1].message then
+        return decoded.choices[1].message.content, nil, stopReason
+    end
+
+    return nil, "Unexpected OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
+end
+
 -- == Multi-image batch query: Gemini ==========================================
 -- Gemini uses inline_data parts interleaved with text parts.
 function M.queryGeminiBatch(images, imageLabels, anchorImages, anchorLabels,
@@ -1982,6 +2097,65 @@ function M.queryOpenAIText(prompt, openaiModel, apiKey, timeoutSecs, maxTokens)
     end
 
     return nil, "Unexpected OpenAI response: " .. tostring(result):sub(1, 200)
+end
+
+function M.queryOpenAICompatibleText(prompt, openaiModel, apiKey, baseUrl, timeoutSecs, maxTokens)
+    local ts = tostring(math.floor(LrDate.currentTime() * 1000))
+    local encodeOk, body = pcall(json.encode, {
+        model      = openaiModel,
+        max_tokens = maxTokens or 8192,
+        messages   = {{
+            role    = "user",
+            content = prompt,
+        }}
+    })
+    if not encodeOk then return nil, "JSON encode failed: " .. tostring(body) end
+
+    local cleanKey = apiKey:gsub("%s+", "")
+    local cleanUrl = baseUrl:gsub("/$", "")
+
+    local tmpCfg = M.TEMP_DIR .. "/ai_sel_cfg_" .. ts .. ".txt"
+    local tmpIn  = M.TEMP_DIR .. "/ai_sel_req_" .. ts .. ".json"
+    local tmpOut = M.TEMP_DIR .. "/ai_sel_resp_" .. ts .. ".json"
+
+    if not M.writeCurlConfig(tmpCfg, cleanUrl .. "/chat/completions", {
+        "Authorization: Bearer " .. cleanKey,
+        "Content-Type: application/json",
+    }, timeoutSecs) then
+        return nil, "Could not write curl config file"
+    end
+
+    local fh = io.open(tmpIn, "w")
+    if not fh then return nil, "Could not write temp file: " .. tmpIn end
+    fh:write(body); fh:close()
+
+    local result, err = M.curlPost(tmpCfg, tmpIn, tmpOut, 0, timeoutSecs)
+    if not result then return nil, err end
+
+    local ok, decoded = pcall(function() return json.decode(result) end)
+    if not ok or type(decoded) ~= "table" then
+        return nil, "Could not parse OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
+    end
+
+    if decoded.error then
+        return nil, "OpenAI-Compatible API error: " .. (decoded.error.message or "Unknown")
+    end
+
+    -- Extract usage for cost tracking
+    if decoded.usage then
+        recordUsage("openai-compatible", openaiModel,
+            decoded.usage.prompt_tokens, decoded.usage.completion_tokens)
+    end
+
+    -- finish_reason: "stop", "length" (= max tokens hit)
+    local stopReason = decoded.choices and decoded.choices[1]
+        and decoded.choices[1].finish_reason
+
+    if decoded.choices and decoded.choices[1] and decoded.choices[1].message then
+        return decoded.choices[1].message.content, nil, stopReason
+    end
+
+    return nil, "Unexpected OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
 end
 
 function M.queryGeminiText(prompt, geminiModel, apiKey, timeoutSecs, maxTokens)
