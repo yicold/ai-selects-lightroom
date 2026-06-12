@@ -21,7 +21,8 @@ local Platform = dofile(_PLUGIN.path .. '/Platform.lua')
 local M = {}
 
 -- == Constants ================================================================
-M.TEMP_DIR = "/tmp"
+-- Use platform-specific temp directory
+M.TEMP_DIR = Platform.getTempDir()
 
 -- Claude's base64 image limit is 5MB. Base64 is ~4/3 of raw, so raw limit ~3.75MB.
 M.CLAUDE_MAX_RAW_BYTES = 3750000
@@ -203,7 +204,7 @@ local NITPICKY_CONTEXT = {
 -- @param preHints        Optional string: user-provided context hints
 -- @param priorSnapshots  Optional array of snapshot tables from previous batches
 -- @return string  The complete prompt text
-function M.buildBatchScoringPrompt(photoIds, timestamps, exifData, anchors, nitpickyScale, includeSnapshot, preHints, priorSnapshots)
+function M.buildBatchScoringPrompt(photoIds, timestamps, exifData, anchors, nitpickyScale, includeSnapshot, preHints, priorSnapshots, enableChineseOutput)
     local parts = {}
 
     -- Section 1: System context with nitpicky modifier
@@ -372,6 +373,11 @@ CRITICAL: The scores array MUST have exactly ]] .. #photoIds .. [[ elements, one
     end
 
     parts[#parts + 1] = "Do not explain your reasoning. Return only the JSON object."
+
+    -- Chinese output instruction (optional)
+    if enableChineseOutput then
+        parts[#parts + 1] = "\n\n请使用中文输出所有评分理由和描述内容（content字段）。"
+    end
 
     return table.concat(parts)
 end
@@ -1126,6 +1132,16 @@ function M.parseBatchResponse(raw, stopReason)
             return partialScores, nil, warnMsg
         end
 
+        -- Try Markdown extraction for models that don't follow JSON format (e.g., qwen3-vl)
+        local mdScores = M.extractMarkdownScores(raw)
+        if mdScores and #mdScores > 0 then
+            local warnMsg = string.format(
+                "Response %s— extracted %d scores from Markdown format (model did not return JSON)",
+                truncated and "TRUNCATED (model hit output token limit) " or "",
+                #mdScores)
+            return mdScores, nil, warnMsg
+        end
+
         local reason = truncated
             and "Response TRUNCATED — model hit output token limit. Try reducing batch size or switching providers."
             or ("Could not parse batch response as JSON: " .. (extractErr or raw:sub(1, 300)))
@@ -1183,6 +1199,84 @@ function M.recoverPartialScores(raw)
         end
     end
     return scores
+end
+
+-- == Markdown score extraction =================================================
+-- Some models (like qwen3-vl) return scores in Markdown format instead of JSON.
+-- Try to extract scores from lines like:
+--   - **Technical**: 5
+--   - **Composition**: 5
+function M.extractMarkdownScores(raw, expectedCount)
+    local scores = {}
+
+    -- Find all photo sections (### **Photo N** or ### Photo N or **Photo N**)
+    local photoPattern = "%*%*Photo (%d+)%*%*"
+    local remaining = raw
+    local lastPhotoEnd = 0
+
+    -- Split by photo sections
+    local photoSections = {}
+    for photoNum, content in raw:gmatch("%*%*Photo (%d+)%*%*([^*]*)") do
+        photoSections[tonumber(photoNum)] = content
+    end
+
+    -- Also try alternative format: ### Photo N
+    if next(photoSections) == nil then
+        for photoNum, content in raw:gmatch("###%s*Photo (%d+)[^\n]*\n([^#]*)") do
+            photoSections[tonumber(photoNum)] = content
+        end
+    end
+
+    if next(photoSections) == nil then
+        return nil
+    end
+
+    for photoNum, content in pairs(photoSections) do
+        local score = {}
+
+        -- Extract technical score
+        score.technical = tonumber(content:match("%*%*Technical%*%*:%s*(%d+)")) or
+                          tonumber(content:match("Technical:%s*(%d+)"))
+
+        -- Extract composition score
+        score.composition = tonumber(content:match("%*%*Composition%*%*:%s*(%d+)")) or
+                            tonumber(content:match("Composition:%s*(%d+)"))
+
+        -- Extract emotion score
+        score.emotion = tonumber(content:match("%*%*Emotion%*%*:%s*(%d+)")) or
+                        tonumber(content:match("Emotion:%s*(%d+)"))
+
+        -- Extract moment score
+        score.moment = tonumber(content:match("%*%*Moment%*%*:%s*(%d+)")) or
+                       tonumber(content:match("Moment:%s*(%d+)"))
+
+        -- Only add if we found at least one score
+        if score.technical or score.composition or score.emotion or score.moment then
+            -- Fill in defaults for missing scores
+            score.technical = score.technical or 5
+            score.composition = score.composition or 5
+            score.emotion = score.emotion or 5
+            score.moment = score.moment or 5
+            score.content = "Extracted from Markdown response"
+            score.category = "other"
+            score.eye_quality = "na"
+            score.reject = false
+
+            scores[photoNum] = M.normalizeScores(score)
+        end
+    end
+
+    -- Convert to ordered array
+    local result = {}
+    for i = 1, expectedCount or 10 do
+        if scores[i] then
+            result[#result + 1] = scores[i]
+        else
+            break
+        end
+    end
+
+    return #result > 0 and result or nil
 end
 
 -- == curl helper ==============================================================
@@ -1256,9 +1350,15 @@ function M.queryOllamaBatch(images, prompt, modelName, ollamaUrl, timeoutSecs)
         totalSize = totalSize + img.fileSize
     end
 
+    -- Note: format: "json" can cause empty responses with some vision models
+    -- Rely on prompt instructions and Markdown fallback parsing instead
     local encodeOk, body = pcall(json.encode, {
         model    = modelName,
         stream   = false,
+        options  = {
+            temperature = 0.3,
+            num_ctx = 4096
+        },
         messages = {{
             role    = "user",
             content = prompt,
@@ -1726,6 +1826,10 @@ function M.queryOllamaText(prompt, modelName, ollamaUrl, timeoutSecs)
     local encodeOk, body = pcall(json.encode, {
         model    = modelName,
         stream   = false,
+        format   = "json",
+        options  = {
+            temperature = 0
+        },
         messages = {{
             role    = "user",
             content = prompt,
@@ -2996,16 +3100,32 @@ function M.computePhash(photo, ts)
     end
 
     local bmpPath = M.TEMP_DIR .. "/ai_sel_phash_" .. ts .. ".bmp"
-    local sipsCmd = string.format(
-        "sips -z 8 9 -s format bmp %s --out %s >/dev/null 2>&1",
-        M.shellEscape(tinyPath), M.shellEscape(bmpPath)
-    )
-    local sipsExit = LrTasks.execute(sipsCmd)
+    local sipsExit
+
+    if Platform.isWindows() then
+        -- Windows: use ImageMagick via Platform abstraction
+        local result = Platform.executeCommand("image", {
+            "resize",
+            tinyPath,
+            bmpPath,
+            "9",
+            "8"
+        })
+        sipsExit = result.success and 0 or 1
+    else
+        -- macOS: use sips
+        local sipsCmd = string.format(
+            "sips -z 8 9 -s format bmp %s --out %s >/dev/null 2>&1",
+            M.shellEscape(tinyPath), M.shellEscape(bmpPath)
+        )
+        sipsExit = LrTasks.execute(sipsCmd)
+    end
+
     M.safeDelete(tinyPath)
 
     if sipsExit ~= 0 then
         M.safeDelete(bmpPath)
-        return nil, "sips resize failed (exit " .. tostring(sipsExit) .. ")"
+        return nil, "image resize failed (exit " .. tostring(sipsExit) .. ")"
     end
 
     local rows, width, height = parseBmpGrayscale(bmpPath)
