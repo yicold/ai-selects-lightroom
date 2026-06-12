@@ -2287,6 +2287,9 @@ function M.queryText(prompt, prefs, maxTokens)
         return M.queryOpenAIText(prompt, prefs.openaiModel, prefs.openaiApiKey, timeout, maxTokens)
     elseif provider == "gemini" then
         return M.queryGeminiText(prompt, prefs.geminiModel, prefs.geminiApiKey, timeout, maxTokens)
+    elseif provider == "openai-compatible" then
+        return M.queryOpenAICompatibleText(prompt, prefs.openaiCompatibleModel,
+            prefs.openaiCompatibleApiKey, prefs.openaiCompatibleBaseUrl, timeout, maxTokens)
     else
         return nil, "Unknown provider: " .. tostring(provider)
     end
