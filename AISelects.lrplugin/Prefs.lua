@@ -20,6 +20,10 @@ local DEFAULTS = {
     openaiModel        = "gpt-4.1-mini",
     geminiApiKey       = "",
     geminiModel        = "gemini-2.5-flash",
+    -- OpenAI-Compatible
+    openaiCompatibleBaseUrl = "",
+    openaiCompatibleApiKey  = "",
+    openaiCompatibleModel  = "",
     timeoutSecs        = 90,
     -- Selection
     selectionMode      = "bestof",
@@ -31,6 +35,7 @@ local DEFAULTS = {
     -- Scoring
     nitpickyScale      = "consumer",   -- "consumer", "enthusiast", "professional"
     batchSize          = 0,            -- 0 = auto (provider default), or user override
+    enableChineseOutput = false,
     -- Story mode
     storyPreset            = "family_vacation",
     -- Pre-scoring context (all modes)
@@ -76,6 +81,9 @@ local function getPrefs()
         openaiModel        = stringPref(prefs, "openaiModel"),
         geminiApiKey       = stringPref(prefs, "geminiApiKey", true),
         geminiModel        = stringPref(prefs, "geminiModel"),
+        openaiCompatibleBaseUrl = stringPref(prefs, "openaiCompatibleBaseUrl", true),
+        openaiCompatibleApiKey  = stringPref(prefs, "openaiCompatibleApiKey", true),
+        openaiCompatibleModel  = stringPref(prefs, "openaiCompatibleModel", true),
         timeoutSecs        = numPref(prefs, "timeoutSecs"),
         selectionMode      = stringPref(prefs, "selectionMode"),
         targetCount        = numPref(prefs, "targetCount"),
@@ -85,6 +93,7 @@ local function getPrefs()
         skipScored         = boolPref(prefs, "skipScored"),
         nitpickyScale      = stringPref(prefs, "nitpickyScale"),
         batchSize          = numPref(prefs, "batchSize"),
+        enableChineseOutput = boolPref(prefs, "enableChineseOutput"),
         storyPreset            = stringPref(prefs, "storyPreset"),
         preHints           = stringPref(prefs, "preHints", true),
         storyPrompt        = stringPref(prefs, "storyPrompt", true),
