@@ -16,9 +16,9 @@ local PROVIDER_CONFIG = {
         batchSize        = 4,
         maxAnchors       = 1,       -- high anchor only
         supportsSnapshot = false,
-        scoringMaxTokens = 2048,
+        scoringMaxTokens = 6144,    -- Increased from 2048 for qwen3-vl:8b batch scoring
         synthesisMaxTokens = 4096,
-        defaultTimeout   = 120,
+        defaultTimeout   = 60,      -- Reduced from 120s; bs=4 res=768 averages 17s
     },
     claude = {
         batchSize        = 10,
@@ -42,6 +42,14 @@ local PROVIDER_CONFIG = {
         supportsSnapshot = true,
         scoringMaxTokens = 4096,
         synthesisMaxTokens = 16384,  -- Extra headroom: Gemini thinking may leak tokens despite thinkingBudget=0
+        defaultTimeout   = 180,
+    },
+    ["openai-compatible"] = {
+        batchSize        = 10,
+        maxAnchors       = 2,
+        supportsSnapshot = true,
+        scoringMaxTokens = 4096,
+        synthesisMaxTokens = 8192,
         defaultTimeout   = 180,
     },
 }
