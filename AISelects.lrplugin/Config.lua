@@ -29,8 +29,8 @@ local VISION_MODELS     = Engine.VISION_MODELS
 local json = dofile(_PLUGIN.path .. '/dkjson.lua')
 
 local function getOllamaVersion(ollamaUrl)
-    local tmpCfg = "/tmp/ai_sel_ver_cfg.txt"
-    local tmpOut = "/tmp/ai_sel_ver.json"
+    local tmpCfg = Platform.getTempPath("ai_sel_ver_cfg.txt")
+    local tmpOut = Platform.getTempPath("ai_sel_ver.json")
 
     local cfh = io.open(tmpCfg, "w")
     if not cfh then return nil end
@@ -188,10 +188,14 @@ LrTasks.startAsyncTask(function()
         props.openaiModel        = current.openaiModel
         props.geminiApiKey       = current.geminiApiKey
         props.geminiModel        = current.geminiModel
+        props.openaiCompatibleBaseUrl = current.openaiCompatibleBaseUrl
+        props.openaiCompatibleApiKey  = current.openaiCompatibleApiKey
+        props.openaiCompatibleModel   = current.openaiCompatibleModel
         props.timeoutSecs        = tostring(current.timeoutSecs)
         props.renderSize         = current.renderSize
         props.burstThresholdSecs = tostring(current.burstThresholdSecs)
         props.skipScored         = current.skipScored
+        props.enableChineseOutput = current.enableChineseOutput
         props.enableLogging      = current.enableLogging
         props.logFolder          = current.logFolder
 
@@ -281,6 +285,11 @@ LrTasks.startAsyncTask(function()
                     title         = "Gemini API (cloud)",
                     value         = LrView.bind("provider"),
                     checked_value = "gemini",
+                },
+                f:radio_button {
+                    title         = "OpenAI-Compatible",
+                    value         = LrView.bind("provider"),
+                    checked_value = "openai-compatible",
                 },
             },
 
@@ -510,6 +519,57 @@ LrTasks.startAsyncTask(function()
             },
 
             -- ═══════════════════════════════════════════════════════════
+            -- OPENAI-COMPATIBLE API
+            -- ═══════════════════════════════════════════════════════════
+            f:group_box {
+                title           = "OpenAI-Compatible API",
+                fill_horizontal = 1,
+                f:row {
+                    f:static_text {
+                        title     = "Base URL:",
+                        width     = LrView.share("label_width"),
+                        alignment = "right",
+                    },
+                    f:edit_field {
+                        value          = LrView.bind("openaiCompatibleBaseUrl"),
+                        width_in_chars = 40,
+                    },
+                },
+                f:row {
+                    f:static_text {
+                        title     = "API Key:",
+                        width     = LrView.share("label_width"),
+                        alignment = "right",
+                    },
+                    f:edit_field {
+                        value          = LrView.bind("openaiCompatibleApiKey"),
+                        width_in_chars = 55,
+                    },
+                },
+                f:row {
+                    f:static_text {
+                        title     = "Model:",
+                        width     = LrView.share("label_width"),
+                        alignment = "right",
+                    },
+                    f:edit_field {
+                        value          = LrView.bind("openaiCompatibleModel"),
+                        width_in_chars = 30,
+                    },
+                },
+                f:row {
+                    f:static_text {
+                        title = "",
+                        width = LrView.share("label_width"),
+                    },
+                    f:static_text {
+                        title      = "Supports any OpenAI-compatible endpoint (Ollama, LM Studio, DeepSeek, Qwen, etc.)",
+                        text_color = LrView.kDisabledColor,
+                    },
+                },
+            },
+
+            -- ═══════════════════════════════════════════════════════════
             -- SCORING & SELECTION
             -- ═══════════════════════════════════════════════════════════
             f:group_box {
@@ -569,6 +629,16 @@ LrTasks.startAsyncTask(function()
                         title = "",
                         width = LrView.share("label_width"),
                     },
+                    f:checkbox {
+                        title = "使用中文输出评分 (Use Chinese for scoring)",
+                        value = LrView.bind("enableChineseOutput"),
+                    },
+                },
+                f:row {
+                    f:static_text {
+                        title = "",
+                        width = LrView.share("label_width"),
+                    },
                     f:static_text {
                         title      = "Target count, weights, mode, and story settings are configured in the Score & Select run dialog.",
                         text_color = LrView.kDisabledColor,
@@ -608,7 +678,7 @@ LrTasks.startAsyncTask(function()
                         title  = "Browse",
                         action = function()
                             LrTasks.startAsyncTask(function()
-                                local tmpFile = "/tmp/ai_sel_folder_pick.txt"
+                                local tmpFile = Platform.getTempPath("ai_sel_folder_pick.txt")
                                 local cmd = 'osascript -e \'POSIX path of (choose folder with prompt "Select Log Folder")\' > "' .. tmpFile .. '" 2>/dev/null'
                                 local exitCode = LrTasks.execute(cmd)
                                 if exitCode == 0 then
@@ -696,6 +766,21 @@ LrTasks.startAsyncTask(function()
             if values.provider == "gemini" and (values.geminiApiKey == nil or values.geminiApiKey == "") then
                 return false, "Gemini API selected — enter your Google AI API key."
             end
+            -- OpenAI-Compatible validation
+            if values.provider == "openai-compatible" then
+                if values.openaiCompatibleBaseUrl == nil or values.openaiCompatibleBaseUrl == "" then
+                    return false, "OpenAI-Compatible selected — enter the base URL."
+                end
+                if not values.openaiCompatibleBaseUrl:match("^https?://") then
+                    return false, "Base URL must start with http:// or https://"
+                end
+                if values.openaiCompatibleApiKey == nil or values.openaiCompatibleApiKey == "" then
+                    return false, "OpenAI-Compatible selected — enter the API key."
+                end
+                if values.openaiCompatibleModel == nil or values.openaiCompatibleModel == "" then
+                    return false, "OpenAI-Compatible selected — enter the model name."
+                end
+            end
             local url = values.ollamaUrl or ""
             if values.provider == "ollama" and not url:match("^https?://") then
                 return false, "Ollama URL must start with http:// or https://"
@@ -718,6 +803,7 @@ LrTasks.startAsyncTask(function()
                     keys = {
                         "timeoutSecs", "burstThresholdSecs",
                         "claudeApiKey", "openaiApiKey", "geminiApiKey",
+                        "openaiCompatibleBaseUrl", "openaiCompatibleApiKey", "openaiCompatibleModel",
                         "provider", "ollamaUrl",
                     },
                     operation = function(_, values)
@@ -739,10 +825,16 @@ LrTasks.startAsyncTask(function()
             prefs.openaiModel        = props.openaiModel
             prefs.geminiApiKey       = props.geminiApiKey
             prefs.geminiModel        = props.geminiModel
+            -- OpenAI-Compatible
+            prefs.openaiCompatibleBaseUrl = props.openaiCompatibleBaseUrl
+            prefs.openaiCompatibleApiKey  = props.openaiCompatibleApiKey
+            prefs.openaiCompatibleModel   = props.openaiCompatibleModel
             prefs.timeoutSecs        = math.floor(tonumber(props.timeoutSecs))
             prefs.renderSize         = props.renderSize
             prefs.burstThresholdSecs = tonumber(props.burstThresholdSecs)
             prefs.skipScored         = props.skipScored
+            -- Chinese Output
+            prefs.enableChineseOutput = props.enableChineseOutput
             prefs.enableLogging      = props.enableLogging
             prefs.logFolder          = props.logFolder
         end
