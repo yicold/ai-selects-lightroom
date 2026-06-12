@@ -230,14 +230,33 @@ local function getProviderInfo(SETTINGS)
         modelName = SETTINGS.openaiModel
     elseif SETTINGS.provider == "gemini" then
         modelName = SETTINGS.geminiModel
-    else
+    elseif SETTINGS.provider == "openai-compatible" then
+        modelName = SETTINGS.openaiCompatibleModel
+    elseif SETTINGS.provider == "ollama" then
         modelName = SETTINGS.model
+    else
+        -- Explicit error: unknown provider, prevent implicit fallback
+        LrDialogs.message("AI Selects - Configuration Error",
+            "Unknown provider: " .. tostring(SETTINGS.provider) ..
+            "\n\nPlease check your provider settings.", "warning")
+        return nil, nil
     end
+
     local providerLabels = {
-        claude = "Claude API", openai = "OpenAI API",
-        gemini = "Gemini API", ollama = "Ollama",
+        claude = "Claude API",
+        openai = "OpenAI API",
+        gemini = "Gemini API",
+        ollama = "Ollama",
+        ["openai-compatible"] = "OpenAI-Compatible",
     }
-    local providerLabel = providerLabels[SETTINGS.provider] or "Ollama"
+    local providerLabel = providerLabels[SETTINGS.provider]
+    if not providerLabel then
+        -- Defensive check: should not reach here
+        LrDialogs.message("AI Selects - Internal Error",
+            "Provider label not found for: " .. tostring(SETTINGS.provider), "warning")
+        return nil, modelName
+    end
+
     return providerLabel, modelName or "unknown"
 end
 
@@ -251,6 +270,7 @@ local function runScoring(context, config, targetPhotos)
     if not SETTINGS then return nil end
 
     local providerLabel, modelName = getProviderInfo(SETTINGS)
+    if not providerLabel then return nil end
     local provider = SETTINGS.provider
     local includeSnapshots = BatchStrategy.supportsSnapshots(provider)
     local weights = BatchStrategy.computeWeights(SETTINGS.emphasisSlider)
