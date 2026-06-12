@@ -70,8 +70,13 @@ local function showRunDialog(context)
         providerLabel = "OpenAI API — " .. current.openaiModel
     elseif current.provider == "gemini" then
         providerLabel = "Gemini API — " .. current.geminiModel
-    else
+    elseif current.provider == "openai-compatible" then
+        providerLabel = "OpenAI-Compatible — " .. current.openaiCompatibleModel
+    elseif current.provider == "ollama" then
         providerLabel = "Ollama — " .. current.model
+    else
+        -- Explicit error: unknown provider
+        providerLabel = "Unknown Provider — " .. tostring(current.provider)
     end
     props.providerInfo = providerLabel
 
