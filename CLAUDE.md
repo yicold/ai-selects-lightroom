@@ -20,6 +20,32 @@ Score (AI vision) → Reject → Burst Dedup → Phash Dedup → MODE SWITCH:
        → Face Coverage → Ordered Collection
 ```
 
+## Provider Routing
+
+The plugin uses explicit provider routing with **no silent fallback**:
+
+- **Explicit routing**: `AIEngine.queryBatch()` and `AIEngine.queryText()` route directly to the configured provider
+- **No fallback on failure**: If a cloud provider API call fails, the operation stops with an error — it never falls back to Ollama or any other provider
+- **Unknown provider handling**: If `prefs.provider` is not a recognized value, returns explicit error instead of defaulting to Ollama
+- **API key validation**: Cloud providers require API keys to be configured; execution stops if missing
+- **Default provider**: New installations default to "ollama" in `Prefs.lua`, but this is only the initial default — once a cloud provider is configured, it is used exclusively
+
+**Supported providers:**
+- `ollama` — Local Ollama instance
+- `claude` — Anthropic Claude API
+- `openai` — OpenAI API
+- `gemini` — Google Gemini API
+- `openai-compatible` — Any OpenAI-compatible endpoint (LM Studio, DeepSeek, etc.)
+
+**Key files:**
+- `AIEngine.lua` lines 1912-1936: `queryBatch()` routing
+- `AIEngine.lua` lines 2278-2295: `queryText()` routing
+- `ScorePhotos.lua` lines 225-261: `getProviderInfo()` with explicit provider handling
+- `ScoreAndSelect.lua` lines 65-82: Provider display logic
+- `Prefs.lua` line 14: Default provider setting
+
+**Design rationale:** Users configure a specific provider because they want predictable behavior and cost control. Silent fallback would violate that expectation — if Claude is configured and fails, the user needs to know it failed, not have it silently switch to Ollama.
+
 ## Key Files
 
 - `AIEngine.lua` — Core AI engine. Scoring prompt, API calls (Ollama, Claude, OpenAI, Gemini), perceptual hashing, face queries, all prompt templates (scoring, scene inventory, story assembly, candidate ranking, beat casting, story review, swap resolution), JSON parsers with `extractJSON` 4-level fallback, partial score recovery. ~3000 lines.
