@@ -51,6 +51,8 @@ local PROVIDER_CONFIG = {
         scoringMaxTokens = 4096,
         synthesisMaxTokens = 8192,
         defaultTimeout   = 180,
+        -- Rate limit: 40 RPM = 1.5s between requests
+        requestDelay     = 1.5,
     },
 }
 
@@ -87,6 +89,15 @@ end
 --- Get the default timeout for a provider.
 function M.getDefaultTimeout(provider)
     return M.getProviderConfig(provider).defaultTimeout
+end
+
+--- Get the request delay for a provider (seconds between API calls).
+-- Returns 0 for providers without rate limits.
+-- @param provider  String: provider name
+-- @return Number: delay in seconds (0 if no limit)
+function M.getRequestDelay(provider)
+    local cfg = M.getProviderConfig(provider)
+    return cfg.requestDelay or 0
 end
 
 --- Max number of carryover anchors for a provider.
