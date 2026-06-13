@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Lightroom Classic plugin (Lua) that uses AI vision models to score and select photos. Multi-pass architecture: AI scoring → three-layer dedup → story assembly → beat casting → review. Supports Claude, OpenAI, Gemini, and Ollama. macOS only.
+A Lightroom Classic plugin (Lua) that uses AI vision models to score and select photos. Multi-pass architecture: AI scoring → three-layer dedup → story assembly → beat casting → review. Supports Claude, OpenAI, Gemini, and Ollama. Cross-platform: macOS and Windows.
 
 ## Architecture
 
@@ -58,8 +58,11 @@ The plugin uses explicit provider routing with **no silent fallback**:
 - `Prefs.lua` — Default preference values.
 - `MetadataDefinition.lua` — 11 custom metadata fields, schemaVersion 4. **Critical: `browsable = true` requires `searchable = true`.**
 - `MetadataTagset.lua` — How fields appear in LR's Metadata panel.
+- `Platform.lua` — Cross-platform abstraction layer. Detects OS, provides unified interface for platform-specific operations (image processing, HTTP requests, database queries).
 - `Info.lua` — Plugin manifest. LrToolkitIdentifier: `io.github.gibbonsr4.ai-selects`.
 - `dkjson.lua` — Bundled JSON library (do not modify).
+- `Utils/macos/` — macOS-specific shell scripts (image.sh, http.sh, db.sh). Use built-in tools: `sips` for image processing, `curl` for HTTP, `sqlite3` for database queries.
+- `Utils/windows/` — Windows-specific PowerShell scripts (image.ps1, http.ps1, db.ps1). Require ImageMagick 7.0+ and sqlite3.
 
 ## Provider Notes
 
@@ -74,9 +77,17 @@ The plugin uses explicit provider routing with **no silent fallback**:
 - **`thinkingBudget: 0` may not always be honored**: Known Gemini API issue. We set generous synthesis token limits (16384) as insurance, and scale token budgets with photo count.
 - **Thought parts in response**: Response parts may include `thought: true` entries. We extract the LAST non-thought text part.
 
+## Cross-Platform Development
+
+- **Platform detection**: `Platform.isWindows()` and `Platform.isMacOS()` detect OS at runtime by checking if plugin path contains backslash (Windows) or forward slash (macOS).
+- **Platform-specific scripts**: All external commands go through `Platform.executeCommand()`, which routes to bash scripts on macOS or PowerShell scripts on Windows.
+- **Path handling**: Use `Platform.normalizePath()` and `Platform.getPathSeparator()` for cross-platform path operations.
+- **Windows requirements**: ImageMagick 7.0+ and sqlite3 must be installed and in PATH. PowerShell execution policy must allow running scripts.
+- **Testing on both platforms**: Changes to platform-specific code must be tested on both macOS and Windows.
+
 ## Lightroom SDK Gotchas
 
-- **schemaVersion**: Must increment when metadata fields change. If LR shows "error reading schema", check `~/Library/Application Support/Adobe/Lightroom/lrc_console.log` for the actual error.
+- **schemaVersion**: Must increment when metadata fields change. If LR shows "error reading schema", check platform-specific log: macOS `~/Library/Application Support/Adobe/Lightroom/lrc_console.log`, Windows `%APPDATA%\Adobe\Lightroom\lrc_console.log`.
 - **browsable + searchable**: `browsable = true` silently requires `searchable = true`. The generic error dialog gives no details.
 - **No custom sort order via SDK**: Collections support "Custom Order" but there's no API to set it. Photos are added in order; user must select Custom Order sort manually.
 - **No Adobe Assisted Culling scores via SDK**: Subject Focus, Eye Focus, Eyes Open are not available.
@@ -93,7 +104,9 @@ The plugin uses explicit provider routing with **no silent fallback**:
 
 ## Common Operations
 
-- **Score photos**: ScorePhotos.lua renders JPEG via `photo:requestJpegThumbnail()`, base64 encodes, sends to AI, writes scores to plugin metadata. Computes dHash perceptual hash via `sips` BMP conversion.
+- **Score photos**: ScorePhotos.lua renders JPEG via `photo:requestJpegThumbnail()`, base64 encodes, sends to AI, writes scores to plugin metadata. Computes dHash perceptual hash via platform-specific image script (sips on macOS, ImageMagick on Windows).
+  - **AI returns per photo**: Technical (1-10), Composition (1-10), Emotion (1-10), Moment (1-10), Content (3-5 word description), Category, Narrative Role, Eye Quality, Reject flag.
+  - **Composite score formula**: `technical * (techPct/100) + composition * (1-techPct/100) * 0.4 + emotion * (1-techPct/100) * 0.3 + moment * (1-techPct/100) * 0.3 + eyePenalty`. Default techPct = 40%. Closed/squinting eyes get -1.5 penalty.
 - **Story mode v3**: Scene inventory clusters photos by WHO+WHEN+WHAT → story assembly plans beats → candidate ranking + beat casting selects photos → review + swap resolution polishes.
 - **Face queries**: Reads LR catalog SQLite database directly via `sqlite3` command. Read-only.
 - **Perceptual hash**: Renders 9×8 BMP via `sips`, computes dHash (64-bit fingerprint). Handles both 24-bit and 32-bit BMPs (modern macOS sips produces 32-bit).
@@ -111,7 +124,8 @@ The plugin uses explicit provider routing with **no silent fallback**:
 ## Testing
 
 - Score a small batch (3-5 photos) first when testing new providers or after code changes.
-- Check logs at `~/Desktop/Selects Logs/`.
-- Check LR console at `~/Library/Application Support/Adobe/Lightroom/lrc_console.log` for plugin errors.
+- Check logs at `~/Desktop/Selects Logs/` (macOS) or `%USERPROFILE%\Desktop\Selects Logs\` (Windows).
+- Check LR console at platform-specific path (see Lightroom SDK Gotchas).
 - Story mode: if AI response parsing fails, it falls back to Best Of with a warning.
 - **Always restart LR after code changes** — the plugin code is cached in memory.
+- **Windows testing**: Verify ImageMagick and sqlite3 are in PATH. Check PowerShell execution policy allows script execution.
