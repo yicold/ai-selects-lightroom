@@ -9,8 +9,11 @@ local LrTasks = import 'LrTasks'
 local Platform = {}
 
 -- Determine if running on Windows
+-- Lightroom's Lua environment doesn't have 'package' or 'os.getenv',
+-- so we detect platform by checking if the plugin path contains a backslash
+-- (Windows uses backslashes, macOS uses forward slashes)
 function Platform.isWindows()
-    return package.config:sub(1,1) == '\\'
+    return _PLUGIN.path:find('\\') ~= nil
 end
 
 -- Determine if running on macOS
@@ -40,6 +43,22 @@ end
 -- Get platform-specific directory name
 function Platform.getPlatformDir()
     return Platform.isWindows() and 'windows' or 'macos'
+end
+
+-- Get temp directory for current platform
+-- Note: Lightroom Lua doesn't have os.getenv, so on Windows we use a known temp location
+function Platform.getTempDir()
+    if Platform.isWindows() then
+        -- Use plugin directory for temp files (guaranteed writable)
+        return _PLUGIN.path
+    else
+        return '/tmp'
+    end
+end
+
+-- Get a temp file path with the given name
+function Platform.getTempPath(filename)
+    return Platform.getTempDir() .. Platform.getPathSeparator() .. filename
 end
 
 -- Execute a platform-specific command
@@ -83,7 +102,7 @@ end
 function Platform.executePowerShell(scriptPath, args)
     local argsStr = ''
     for i, arg in ipairs(args) do
-        argsStr = argsStr .. ' -' .. arg.key .. ' "' .. arg.value .. '"'
+        argsStr = argsStr .. ' "' .. arg .. '"'
     end
 
     local cmd = 'powershell.exe -ExecutionPolicy Bypass -File "' .. scriptPath .. '"' .. argsStr

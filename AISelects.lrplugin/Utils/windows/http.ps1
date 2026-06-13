@@ -1,41 +1,30 @@
-# HTTP request script for Windows using Invoke-WebRequest
+# HTTP request script for Windows using curl
+# Windows 10+ has built-in curl.exe (must use .exe to avoid PowerShell alias)
+# Args: ConfigFile [BodyFile] OutputFile
+# - 2 args: ConfigFile, OutputFile (GET)
+# - 3 args: ConfigFile, BodyFile, OutputFile (POST)
+
 param(
-    [string]$Url,
-    [string]$Method,
-    [string]$HeadersFile,
+    [Parameter(Position=0)]
+    [string]$ConfigFile,
+    [Parameter(Position=1)]
     [string]$BodyFile,
-    [string]$OutputFile,
-    [int]$Timeout
+    [Parameter(Position=2)]
+    [string]$OutputFile
 )
 
-try {
-    # Read headers from file
-    $headers = @{}
-    if (Test-Path $HeadersFile) {
-        Get-Content $HeadersFile | ForEach-Object {
-            if ($_ -match "^([^:]+):\s*(.+)$") {
-                $headers[$matches[1]] = $matches[2]
-            }
-        }
-    }
-
-    # Read body from file
-    $body = $null
-    if (Test-Path $BodyFile) {
-        $body = Get-Content $BodyFile -Raw
-    }
-
-    # Execute request
-    if ($Method -eq "POST") {
-        Invoke-RestMethod -Uri $Url -Method Post -Headers $headers -Body $body -OutFile $OutputFile -TimeoutSec $Timeout
-    }
-    else {
-        Invoke-RestMethod -Uri $Url -Method Get -Headers $headers -OutFile $OutputFile -TimeoutSec $Timeout
-    }
-
-    exit 0
+# If only 2 args, it's GET (no body)
+if ([string]::IsNullOrEmpty($OutputFile)) {
+    $OutputFile = $BodyFile
+    $BodyFile = ""
 }
-catch {
-    Write-Error $_.Exception.Message
-    exit 1
+
+# Use curl.exe explicitly (curl in PowerShell is an alias to Invoke-WebRequest)
+if ($BodyFile -ne "") {
+    curl.exe -K $ConfigFile -d "@$BodyFile" -o $OutputFile
 }
+else {
+    curl.exe -K $ConfigFile -o $OutputFile
+}
+
+exit $LASTEXITCODE
