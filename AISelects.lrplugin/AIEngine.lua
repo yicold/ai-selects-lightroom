@@ -1913,6 +1913,12 @@ function M.queryBatch(images, imageLabels, anchorImages, anchorLabels, prompt, p
     local provider = prefs.provider
     local timeout  = prefs.timeoutSecs or BatchStrategy.getDefaultTimeout(provider)
 
+    -- 速率限制：在API调用前等待
+    local delay = BatchStrategy.getRequestDelay(provider)
+    if delay > 0 then
+        LrTasks.sleep(delay)
+    end
+
     if provider == "ollama" then
         -- Ollama: simpler path, no anchor images in the API call
         -- (anchors are described in the prompt text only, not as images,
@@ -2278,6 +2284,12 @@ end
 function M.queryText(prompt, prefs, maxTokens)
     local provider = prefs.provider
     local timeout  = prefs.timeoutSecs or BatchStrategy.getDefaultTimeout(provider)
+
+    -- 速率限制：在API调用前等待
+    local delay = BatchStrategy.getRequestDelay(provider)
+    if delay > 0 then
+        LrTasks.sleep(delay)
+    end
 
     if provider == "ollama" then
         return M.queryOllamaText(prompt, prefs.model, prefs.ollamaUrl, timeout)
