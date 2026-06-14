@@ -521,14 +521,49 @@ local function runScoring(context, config, targetPhotos)
         end
 
         if not rawResponse then
-            -- Check if this is a content safety block — if so, retry photos individually
-            -- so only the offending photo(s) are lost instead of the whole batch.
+            -- Classify error type
             local isSafetyBlock = queryErr and (
                 queryErr:find("PROHIBITED_CONTENT") or queryErr:find("SAFETY")
                 or queryErr:find("blockReason"))
 
-            if isSafetyBlock and #images > 1 then
-                log:log("  Content safety block on batch — retrying " .. #images .. " photos individually")
+            local isRetryableError = queryErr and (
+                queryErr:find("openai_error") or
+                queryErr:find("Upstream request failed") or
+                queryErr:find("timeout") or
+                queryErr:find("ECONNREFUSED") or
+                queryErr:find("ENOTFOUND") or
+                queryErr:find("502") or
+                queryErr:find("503") or
+                queryErr:find("504"))
+
+            -- Retry once for transient errors (not safety blocks)
+            if isRetryableError and not isSafetyBlock then
+                log:log("  API error (retryable): " .. (queryErr or "unknown"))
+                log:log("  Waiting 5s before retry...")
+                LrTasks.sleep(5)
+
+                local retryStart = LrDate.currentTime()
+                rawResponse, queryErr, stopReason = Engine.queryBatch(
+                    images, imageLabels, anchorImages, anchorLabels,
+                    prompt, SETTINGS, maxTokens
+                )
+                local retryElapsed = LrDate.currentTime() - retryStart
+                log:log(string.format("  Retry query time: %.1fs", retryElapsed))
+
+                if rawResponse then
+                    log:log("  Retry succeeded")
+                    if stopReason then
+                        log:log("  Stop reason: " .. tostring(stopReason))
+                    end
+                else
+                    log:log("  Retry failed: " .. (queryErr or "unknown"))
+                end
+            end
+
+            -- Handle errors after retry (or non-retryable errors)
+            if not rawResponse then
+                if isSafetyBlock and #images > 1 then
+                    log:log("  Content safety block on batch — retrying " .. #images .. " photos individually")
                 local retryScored = 0
                 local retryErrors = 0
                 for pos = 1, #images do
@@ -591,16 +626,17 @@ local function runScoring(context, config, targetPhotos)
                 end
                 log:logBatch(batchIdx, totalBatches, #batch,
                     string.format("Safety retry: %d scored, %d blocked", retryScored, retryErrors))
-            else
-                log:logBatch(batchIdx, totalBatches, #batch, "API error: " .. (queryErr or "unknown"))
-                for pos = 1, #images do
-                    local info = photoByPosition[pos]
-                    if info then
-                        errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  Batch API error: " .. (queryErr or "unknown")
+                else
+                    log:logBatch(batchIdx, totalBatches, #batch, "API error: " .. (queryErr or "unknown"))
+                    for pos = 1, #images do
+                        local info = photoByPosition[pos]
+                        if info then
+                            errorLog[#errorLog + 1] = "- " .. info.filename .. "\n  Batch API error: " .. (queryErr or "unknown")
+                        end
                     end
                 end
+                break  -- skip to next batch
             end
-            break  -- skip to next batch
         end
 
         if log.enabled then

@@ -45,12 +45,12 @@ local PROVIDER_CONFIG = {
         defaultTimeout   = 180,
     },
     ["openai-compatible"] = {
-        batchSize        = 10,
-        maxAnchors       = 2,
+        batchSize        = 1,   -- Single photo per request for stable output parsing
+        maxAnchors       = 1,   -- Reduced from 2 to lower request size
         supportsSnapshot = true,
-        scoringMaxTokens = 4096,
-        synthesisMaxTokens = 8192,
-        defaultTimeout   = 180,
+        scoringMaxTokens = 16384, -- Increased from 8192 to prevent truncation (stop reason: length)
+        synthesisMaxTokens = 16384,
+        defaultTimeout   = 240, -- Increased from 180s for unstable endpoints
         -- Rate limit: 40 RPM = 1.5s between requests
         requestDelay     = 1.5,
     },
@@ -66,6 +66,11 @@ end
 -- @param provider  String: provider name
 -- @param override  Number or nil: user-configured batch size (0 = auto)
 function M.getBatchSize(provider, override)
+    -- openai-compatible has a hard limit of 1 image per request
+    -- Force batch size to 1 regardless of user override
+    if provider == "openai-compatible" then
+        return 1
+    end
     if override and override > 0 then
         return override
     end

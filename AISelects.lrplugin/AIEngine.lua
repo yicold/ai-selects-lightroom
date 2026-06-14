@@ -1072,6 +1072,20 @@ end
 
 -- Normalize a single photo's score entry from the batch response.
 function M.normalizeScores(data)
+    -- Guard against non-table input (malformed AI response)
+    if type(data) ~= "table" then
+        return {
+            technical   = 5,
+            composition = 5,
+            emotion     = 5,
+            moment      = 5,
+            content     = "Invalid response format",
+            category    = "other",
+            eye_quality = "na",
+            reject      = false,
+        }
+    end
+
     -- Validate eye_quality against allowed values
     local eyeVal = tostring(data.eye_quality or "na"):lower()
     local validEye = { good = true, fair = true, closed = true, na = true }
@@ -1160,7 +1174,12 @@ function M.parseBatchResponse(raw, stopReason)
 
     -- Normalize each score entry, preserving array order (positional mapping)
     local scores = {}
-    for _, entry in ipairs(scoresRaw) do
+    local warnedBadEntry = false
+    for i, entry in ipairs(scoresRaw) do
+        if type(entry) ~= "table" and not warnedBadEntry then
+            -- Log warning once for the first bad entry
+            warnedBadEntry = true
+        end
         scores[#scores + 1] = M.normalizeScores(entry)
     end
 
@@ -1286,6 +1305,7 @@ function M.writeCurlConfig(cfgPath, url, headers, timeoutSecs)
     local fh = io.open(cfgPath, "w")
     if not fh then return false end
     fh:write("-s\n")
+    fh:write("-i\n") -- Include HTTP headers in output to see status code
     fh:write("-X POST\n")
     fh:write(string.format('url = "%s"\n', url))
     for _, h in ipairs(headers) do
@@ -1699,11 +1719,20 @@ function M.queryOpenAICompatibleBatch(images, imageLabels, anchorImages, anchorL
     local cleanKey = apiKey:gsub("%s+", "")
     local cleanUrl = baseUrl:gsub("/$", "")
 
+    -- Build API endpoint URL
+    -- If baseUrl already ends with /v1, use it directly; otherwise append /v1
+    local apiEndpoint
+    if cleanUrl:match("/v1$") then
+        apiEndpoint = cleanUrl .. "/chat/completions"
+    else
+        apiEndpoint = cleanUrl .. "/v1/chat/completions"
+    end
+
     local tmpCfg = M.TEMP_DIR .. "/ai_sel_cfg_" .. ts .. ".txt"
     local tmpIn  = M.TEMP_DIR .. "/ai_sel_req_" .. ts .. ".json"
     local tmpOut = M.TEMP_DIR .. "/ai_sel_resp_" .. ts .. ".json"
 
-    if not M.writeCurlConfig(tmpCfg, cleanUrl .. "/chat/completions", {
+    if not M.writeCurlConfig(tmpCfg, apiEndpoint, {
         "Authorization: Bearer " .. cleanKey,
         "Content-Type: application/json",
     }, timeoutSecs) then
@@ -1717,13 +1746,34 @@ function M.queryOpenAICompatibleBatch(images, imageLabels, anchorImages, anchorL
     local result, err = M.curlPost(tmpCfg, tmpIn, tmpOut, totalSize, timeoutSecs)
     if not result then return nil, err end
 
-    local ok, decoded = pcall(function() return json.decode(result) end)
+    -- Parse HTTP headers and body (curl -i includes headers)
+    local httpStatus = nil
+    local jsonBody = result
+    -- Try both \r\n\r\n and \n\n as header/body separator
+    local headerEnd = result:find("\r\n\r\n") or result:find("\n\n")
+    if headerEnd then
+        local headers = result:sub(1, headerEnd - 1)
+        -- Skip the separator (4 chars for \r\n\r\n, 2 for \n\n)
+        local sepLen = result:sub(headerEnd, headerEnd + 3) == "\r\n\r\n" and 4 or 2
+        jsonBody = result:sub(headerEnd + sepLen)
+        -- Extract HTTP status code from first line (e.g., "HTTP/1.1 200 OK")
+        local statusLine = headers:match("HTTP/%d%.%d (%d+)")
+        if statusLine then httpStatus = tonumber(statusLine) end
+    end
+
+    local ok, decoded = pcall(function() return json.decode(jsonBody) end)
     if not ok or type(decoded) ~= "table" then
-        return nil, "Could not parse OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
+        local statusInfo = httpStatus and string.format(" (HTTP %d)", httpStatus) or ""
+        return nil, "Could not parse OpenAI-Compatible response" .. statusInfo .. ": " .. tostring(jsonBody):sub(1, 200)
     end
 
     if decoded.error then
-        return nil, "OpenAI-Compatible API error: " .. (decoded.error.message or "Unknown")
+        -- Show full error object for better debugging
+        local errObj = decoded.error
+        local errStr = errObj.message or "Unknown"
+        if errObj.type then errStr = errStr .. " (type: " .. errObj.type .. ")" end
+        if errObj.code then errStr = errStr .. " (code: " .. tostring(errObj.code) .. ")" end
+        return nil, "OpenAI-Compatible API error: " .. errStr
     end
 
     -- Extract usage for cost tracking
@@ -2124,11 +2174,20 @@ function M.queryOpenAICompatibleText(prompt, openaiModel, apiKey, baseUrl, timeo
     local cleanKey = apiKey:gsub("%s+", "")
     local cleanUrl = baseUrl:gsub("/$", "")
 
+    -- Build API endpoint URL
+    -- If baseUrl already ends with /v1, use it directly; otherwise append /v1
+    local apiEndpoint
+    if cleanUrl:match("/v1$") then
+        apiEndpoint = cleanUrl .. "/chat/completions"
+    else
+        apiEndpoint = cleanUrl .. "/v1/chat/completions"
+    end
+
     local tmpCfg = M.TEMP_DIR .. "/ai_sel_cfg_" .. ts .. ".txt"
     local tmpIn  = M.TEMP_DIR .. "/ai_sel_req_" .. ts .. ".json"
     local tmpOut = M.TEMP_DIR .. "/ai_sel_resp_" .. ts .. ".json"
 
-    if not M.writeCurlConfig(tmpCfg, cleanUrl .. "/chat/completions", {
+    if not M.writeCurlConfig(tmpCfg, apiEndpoint, {
         "Authorization: Bearer " .. cleanKey,
         "Content-Type: application/json",
     }, timeoutSecs) then
@@ -2142,13 +2201,34 @@ function M.queryOpenAICompatibleText(prompt, openaiModel, apiKey, baseUrl, timeo
     local result, err = M.curlPost(tmpCfg, tmpIn, tmpOut, 0, timeoutSecs)
     if not result then return nil, err end
 
-    local ok, decoded = pcall(function() return json.decode(result) end)
+    -- Parse HTTP headers and body (curl -i includes headers)
+    local httpStatus = nil
+    local jsonBody = result
+    -- Try both \r\n\r\n and \n\n as header/body separator
+    local headerEnd = result:find("\r\n\r\n") or result:find("\n\n")
+    if headerEnd then
+        local headers = result:sub(1, headerEnd - 1)
+        -- Skip the separator (4 chars for \r\n\r\n, 2 for \n\n)
+        local sepLen = result:sub(headerEnd, headerEnd + 3) == "\r\n\r\n" and 4 or 2
+        jsonBody = result:sub(headerEnd + sepLen)
+        -- Extract HTTP status code from first line (e.g., "HTTP/1.1 200 OK")
+        local statusLine = headers:match("HTTP/%d%.%d (%d+)")
+        if statusLine then httpStatus = tonumber(statusLine) end
+    end
+
+    local ok, decoded = pcall(function() return json.decode(jsonBody) end)
     if not ok or type(decoded) ~= "table" then
-        return nil, "Could not parse OpenAI-Compatible response: " .. tostring(result):sub(1, 200)
+        local statusInfo = httpStatus and string.format(" (HTTP %d)", httpStatus) or ""
+        return nil, "Could not parse OpenAI-Compatible response" .. statusInfo .. ": " .. tostring(jsonBody):sub(1, 200)
     end
 
     if decoded.error then
-        return nil, "OpenAI-Compatible API error: " .. (decoded.error.message or "Unknown")
+        -- Show full error object for better debugging
+        local errObj = decoded.error
+        local errStr = errObj.message or "Unknown"
+        if errObj.type then errStr = errStr .. " (type: " .. errObj.type .. ")" end
+        if errObj.code then errStr = errStr .. " (code: " .. tostring(errObj.code) .. ")" end
+        return nil, "OpenAI-Compatible API error: " .. errStr
     end
 
     -- Extract usage for cost tracking
